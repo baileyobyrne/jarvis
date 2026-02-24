@@ -1,0 +1,46 @@
+# ─── Secrets & credentials ────────────────────────────────────────────────────
+.env
+auth-token.json
+credentials/
+identity/
+telegram/
+openclaw.json
+openclaw.json.bak
+openclaw.json.bak2
+
+# ─── Backup files ─────────────────────────────────────────────────────────────
+*.bak
+
+# ─── Nested runtime state ─────────────────────────────────────────────────────
+**/.openclaw/
+
+# ─── Large data files (shadow DB, RP Data, exports) ───────────────────────────
+willoughby-contacts.json
+willoughby-contacts.json.bak
+willoughby-contacts-full.csv
+willoughby-contacts.csv
+formatted-contacts.csv
+rp_data.csv
+
+# ─── Runtime state files ──────────────────────────────────────────────────────
+recently-planned.json
+seen-listings.json
+geo-cache.json
+browser-state.json
+pipeline-state.json
+ignite-queue.json
+ignite-errors.json
+update-check.json
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── Node modules ─────────────────────────────────────────────────────────────
+node_modules/
+
+# ─── Browser / Playwright runtime state ───────────────────────────────────────
+devices/
+canvas/
+completions/
+agents/
