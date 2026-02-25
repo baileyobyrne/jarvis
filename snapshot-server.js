@@ -338,7 +338,6 @@ const SNAPSHOT_FILES = [
   '/root/.openclaw/workspace/enrich-contacts.js',
   '/root/.openclaw/workspace/willoughby-contacts-schema.json',
   '/root/.openclaw/cron/jobs.json',
-  '/root/.openclaw/CLAUDE.md',
   '/root/.openclaw/workspace/AGENTS.md',
 ];
 
@@ -389,13 +388,18 @@ app.post('/snapshot', (req, res) => {
 app.get('/api/plan/today', requireAuth, (req, res) => {
   try {
     const rows = db.prepare(`
-      SELECT dp.*, c.name, c.mobile, c.address, c.suburb, c.propensity_score
+      SELECT dp.*,
+             c.name, c.mobile, c.address, c.suburb,
+             c.propensity_score AS contact_score,
+             c.tenure_years, c.occupancy AS contact_occupancy,
+             c.beds, c.baths, c.cars, c.property_type AS contact_property_type,
+             c.pricefinder_estimate, c.pricefinder_fetched_at
       FROM daily_plans dp
       LEFT JOIN contacts c ON c.id = dp.contact_id
       WHERE dp.plan_date = date('now', 'localtime')
       ORDER BY
         CASE WHEN dp.called_at IS NULL THEN 0 ELSE 1 END ASC,
-        c.propensity_score DESC
+        COALESCE(dp.propensity_score, c.propensity_score) DESC
     `).all();
     res.json(rows);
   } catch (e) {
@@ -409,11 +413,14 @@ app.patch('/api/plan/:contactId/outcome', requireAuth, (req, res) => {
   try {
     const { contactId } = req.params;
     const { outcome, notes } = req.body;
-    db.prepare(`
+    const result = db.prepare(`
       UPDATE daily_plans
       SET called_at = datetime('now', 'localtime'), outcome = ?, notes = ?
       WHERE plan_date = date('now', 'localtime') AND contact_id = ?
     `).run(outcome, notes, contactId);
+    if (!result.changes) {
+      return res.status(404).json({ error: 'Contact not in today\'s plan' });
+    }
     db.prepare(`
       INSERT INTO call_log (contact_id, called_at, outcome, notes)
       VALUES (?, datetime('now', 'localtime'), ?, ?)
@@ -456,7 +463,7 @@ app.get('/api/reminders/upcoming', requireAuth, (req, res) => {
 // GET /api/market
 app.get('/api/market', requireAuth, (req, res) => {
   try {
-    const days = parseInt(req.query.days) || 7;
+    const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 365);
     const rows = db.prepare(`
       SELECT * FROM market_events
       WHERE detected_at >= datetime('now', '-' || ? || ' days')
@@ -469,14 +476,17 @@ app.get('/api/market', requireAuth, (req, res) => {
   }
 });
 
-// GET /api/history
+// GET /api/history — call log (today by default; ?days=N for wider range up to 90)
 app.get('/api/history', requireAuth, (req, res) => {
   try {
-    const days = parseInt(req.query.days) || 90;
+    const days = Math.min(Math.max(parseInt(req.query.days) || 1, 1), 90);
     const rows = db.prepare(`
-      SELECT * FROM market_events
-      WHERE detected_at >= datetime('now', '-' || ? || ' days')
-      ORDER BY event_date DESC LIMIT 200
+      SELECT cl.id, cl.contact_id, cl.called_at, cl.outcome, cl.notes,
+             c.name, c.mobile, c.address, c.suburb, c.propensity_score
+      FROM call_log cl
+      LEFT JOIN contacts c ON c.id = cl.contact_id
+      WHERE cl.called_at >= datetime('now', 'localtime', '-' || ? || ' days')
+      ORDER BY cl.called_at DESC LIMIT 200
     `).all(String(days));
     res.json(rows);
   } catch (e) {
@@ -583,9 +593,66 @@ app.get('/api/buyers', requireAuth, (req, res) => {
   }
 });
 
+// GET /api/buyers/calllist — active buyers not yet done, grouped by listing
+app.get('/api/buyers/calllist', requireAuth, (req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT * FROM buyers
+      WHERE (done_date IS NULL OR done_date = '')
+        AND (status IS NULL OR status = 'active')
+      ORDER BY listing_address ASC, enquiry_date DESC
+    `).all();
+    // Group by listing_address
+    const grouped = {};
+    for (const b of rows) {
+      const key = b.listing_address || 'Unknown Listing';
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(b);
+    }
+    res.json(grouped);
+  } catch (e) {
+    console.error('[GET /api/buyers/calllist]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PATCH /api/buyers/:id/outcome — log a buyer call outcome
+app.patch('/api/buyers/:id/outcome', requireAuth, (req, res) => {
+  try {
+    const { id } = req.params;
+    const { outcome, notes } = req.body;
+    db.prepare(`
+      UPDATE buyers SET called_at = datetime('now','localtime'), outcome = ?,
+        notes = CASE WHEN ? IS NOT NULL THEN ? ELSE notes END,
+        updated_at = datetime('now','localtime')
+      WHERE id = ?
+    `).run(outcome, notes, notes, id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[PATCH /api/buyers/:id/outcome]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PATCH /api/buyers/:id/done — mark buyer as done (remove from call list)
+app.patch('/api/buyers/:id/done', requireAuth, (req, res) => {
+  try {
+    const { id } = req.params;
+    db.prepare(`
+      UPDATE buyers SET done_date = date('now','localtime'), updated_at = datetime('now','localtime')
+      WHERE id = ?
+    `).run(id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[PATCH /api/buyers/:id/done]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/intel/upload
 app.post('/api/intel/upload', requireAuth, upload.single('file'), (req, res) => {
   try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
     const { originalname, mimetype } = req.file;
     db.prepare(`
       INSERT INTO intel_docs (filename, file_type, uploaded_at)
@@ -594,6 +661,103 @@ app.post('/api/intel/upload', requireAuth, upload.single('file'), (req, res) => 
     res.json({ ok: true });
   } catch (e) {
     console.error('[POST /api/intel/upload]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PATCH /api/contacts/:id/pricefinder — called by local pricefinder-estimates-local.js
+app.patch('/api/contacts/:id/pricefinder', requireAuth, (req, res) => {
+  try {
+    const { id }       = req.params;
+    const { estimate } = req.body;
+    if (!estimate) return res.status(400).json({ error: 'estimate required' });
+    db.prepare(`
+      UPDATE contacts
+      SET pricefinder_estimate = ?, pricefinder_fetched_at = datetime('now','localtime')
+      WHERE id = ?
+    `).run(estimate, id);
+    res.json({ ok: true, id, estimate });
+  } catch (e) {
+    console.error('[PATCH /api/contacts/:id/pricefinder]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/market-events/ingest — bulk ingest from pricefinder-market-local.js
+app.post('/api/market-events/ingest', requireAuth, (req, res) => {
+  try {
+    const events = req.body;
+    if (!Array.isArray(events)) return res.status(400).json({ error: 'Expected array' });
+    const stmt = db.prepare(`
+      INSERT OR IGNORE INTO market_events
+        (detected_at, event_date, type, address, suburb, price,
+         beds, baths, cars, property_type, agent_name, agency, source)
+      VALUES (datetime('now','localtime'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pricefinder')
+    `);
+    const run = db.transaction((evts) => {
+      let n = 0;
+      for (const e of evts) {
+        const r = stmt.run(
+          e.event_date || null, e.type || 'sold',
+          e.address, e.suburb, e.price || null,
+          e.beds || null, e.baths || null, e.cars || null,
+          e.property_type || null, e.agent_name || null, e.agency || null
+        );
+        if (r.changes) n++;
+      }
+      return n;
+    });
+    const inserted = run(events);
+    console.log(`[POST /api/market-events/ingest] ${inserted}/${events.length} new events`);
+    res.json({ ok: true, inserted, total: events.length });
+  } catch (e) {
+    console.error('[POST /api/market-events/ingest]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/prospecting/ingest — bulk upsert from pricefinder-prospecting-local.js
+app.post('/api/prospecting/ingest', requireAuth, (req, res) => {
+  try {
+    const contacts = req.body;
+    if (!Array.isArray(contacts)) return res.status(400).json({ error: 'Expected array' });
+    const stmt = db.prepare(`
+      INSERT INTO contacts
+        (id, name, address, suburb, state, postcode, occupancy, tenure_years,
+         property_type, source, created_at, updated_at)
+      VALUES
+        (@id, @name, @address, @suburb, @state, @postcode, @occupancy, @tenure_years,
+         @property_type, 'pricefinder', datetime('now'), datetime('now'))
+      ON CONFLICT(id) DO UPDATE SET
+        occupancy      = CASE WHEN excluded.occupancy    IS NOT NULL THEN excluded.occupancy    ELSE contacts.occupancy    END,
+        tenure_years   = CASE WHEN excluded.tenure_years IS NOT NULL THEN excluded.tenure_years ELSE contacts.tenure_years END,
+        property_type  = CASE WHEN excluded.property_type != ''      THEN excluded.property_type ELSE contacts.property_type END,
+        updated_at     = datetime('now')
+    `);
+    const run = db.transaction((items) => {
+      let n = 0;
+      for (const c of items) {
+        const addrKey = (c.address || '').toLowerCase().replace(/\s+/g, '_');
+        stmt.run({
+          id:            c.id || `pf_${addrKey}_${(c.suburb || '').toLowerCase()}`,
+          name:          c.name          || 'Unknown Owner',
+          address:       c.address       || '',
+          suburb:        c.suburb        || '',
+          state:         c.state         || 'NSW',
+          postcode:      c.postcode      || '',
+          occupancy:     c.occupancy     || null,
+          tenure_years:  c.tenure_years  || null,
+          property_type: c.property_type || '',
+        });
+        n++;
+      }
+      return n;
+    });
+    const upserted = run(contacts);
+    console.log(`[POST /api/prospecting/ingest] ${upserted} contacts upserted`);
+    res.json({ ok: true, upserted });
+  } catch (e) {
+    console.error('[POST /api/prospecting/ingest]', e.message);
     res.status(500).json({ error: e.message });
   }
 });

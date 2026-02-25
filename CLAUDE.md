@@ -6,13 +6,13 @@ Technical architecture for an autonomous real estate monitoring and prospecting 
    - **Trigger:** Cron job 3× daily — approx. 7am, 12pm, 5pm AEDT (21:00, 02:00, 07:00 UTC). *(Previously documented as "every 15 minutes" — corrected to match `cron/jobs.json`.)*
    - **Function:** Monitors Gmail for REA, Domain, and Homely alerts[cite: 1569, 2393]. Also parses CoreLogic/RP Data forwarded emails.
    - **Logic:** Applies a 1.5km geofence and Haversine proximity scoring to AgentBox contacts[cite: 1569, 2394]. CoreLogic rentals write `occupancy: "Investor"` back to the shadow DB.
-   - **Output:** Writes up to 30 scored neighbours per market event directly to the **Notion Command Center** (`🎯 To Call Today`). Fires a concise heads-up to `@willoughby_monitor_bot` Telegram. CoreLogic alerts bypass Telegram and go straight to Notion.
+   - **Output:** Writes up to 30 scored neighbours per market event to SQLite (`market_events`, `contacts`). Fires a concise heads-up to `@willoughby_monitor_bot` Telegram.
 
 2. **Pipeline B (Proactive):** `daily-planner.js`
    - **Trigger:** Cron job Mon–Fri at 7:00 AM AEDT[cite: 1599, 2397] (`0 20 * * 1-5` UTC).
    - **Function:** Parses CoreLogic/RP Data CSVs and McGrath email forwards[cite: 1570, 2393].
-   - **Logic:** Calculates "Propensity to Sell" scores (Tenure > 7yrs = +20, past appraisals = +30, investor status = +15)[cite: 2398]. Syncs Notion contacted statuses → 180-day local cooldown. Local planned contacts get 90-day cooldown.
-   - **Output:** Writes scored contacts with Claude-generated talking points **directly to Notion** (`🎯 To Call Today`), filling the board to exactly 80 slots. *(Previously documented as "Make.com / Apple Reminders" — corrected to match current code.)*
+   - **Logic:** Calculates "Propensity to Sell" scores (Tenure > 7yrs = +20, past appraisals = +30, investor status = +15, Past Vendor = +25, Prospective Vendor = +15)[cite: 2398]. Score tiers: Prime ≥45, Warm 20–44, Cold <20. Distribution (3,327 contacts): prime=149, warm=406, low=1374, zero=1446. Syncs Notion contacted statuses → 180-day local cooldown. Local planned contacts get 90-day cooldown.
+   - **Output:** Writes scored contacts with Claude-generated talking points to **SQLite** (`daily_plans` + `contacts` tables). Board-full guard (80 slots) reads from SQLite `daily_plans` ✅.
 
 ## 📋 Notion Command Center Schema
 The pipeline writes to a single Notion database. Confirmed property schema:
@@ -55,14 +55,14 @@ The Notion Command Center will be replaced by a self-hosted web dashboard on the
 - Daily Planner view: today's 80 contacts with scores + talking points
 - Source badge (Market Event vs Daily Planner)
 
-**Migration order:** Express + SQLite first → migrate pipeline scripts to local API → build React UI against live data → decommission Notion dependency.
+**Migration state (as of 2026-02-25):** Pipeline scripts write to SQLite ✅. Notion dependency decommissioned ✅. `contacts` table has 3,327 rows with real data (backfilled via `workspace/backfill-contacts.js`). Dashboard is a 3-file React SPA: `workspace/dashboard/index.html` (CDN shell, 18 lines), `workspace/dashboard/dashboard.js` (React components, Babel), `workspace/dashboard/dashboard.css` (Intelligence Terminal design tokens). `/api/contacts/today` is a legacy endpoint reading `recently-planned.json` — use `/api/plan/today` (SQLite) for current data. `/api/history` queries `call_log JOIN contacts` for real call history. Board-full guard and `/api/status` both read from SQLite ✅. Pricefinder integration: 3 local scripts (`pricefinder-estimates-local.js`, `pricefinder-market-local.js`, `pricefinder-prospecting-local.js`) run on Mac and POST to VPS endpoints.
 
 ## 🛡️ Critical Safety Rules
 - **READ-ONLY CRM:** Never write automated data directly to AgentBox via API to avoid scraping bans.
 - **Shadow Database:** Query the local `willoughby-contacts.json` (67,316 contacts) instead of the live CRM[cite: 2392, 2398].
 - **Geocoding Hygiene:** Respect Nominatim rate limits (1.1s delay) and use `geo-cache.json` for geocoding[cite: 2346, 2347].
 - **API Tokens:** Use `../../.env` for all secrets — resolves to `/root/.openclaw/.env` (AgentBox, OpenAI, Anthropic, Telegram)[cite: 1209, 2388].
-- **⚠️ SECURITY FLAG — `snapshot-server.js`:** Password `jarvis2026` is hardcoded in plaintext at line 4. Must be moved to `/root/.openclaw/.env` as `SNAPSHOT_PASSWORD` before any public exposure. Server runs on port 4242 at `72.62.74.105`.
+- **`snapshot-server.js`:** `DASHBOARD_PASSWORD` is loaded from `.env` via `process.env.DASHBOARD_PASSWORD` — startup guard refuses to start if missing. CLAUDE.md is intentionally excluded from `SNAPSHOT_FILES` to avoid bundling documentation. Server runs on HTTPS port 4242 at `72.62.74.105`.
 
 ## 📂 Workspace Topology
 - **Production Scripts:** `/root/.openclaw/skills/agentbox-willoughby/`
@@ -75,6 +75,10 @@ The Notion Command Center will be replaced by a self-hosted web dashboard on the
 - **Test Pipeline A:** `node monitor-email.js` [cite: 2388]
 - **Test Pipeline B:** `node daily-planner.js` [cite: 1215]
 - **Update Database:** `node refetch-contacts-full.js` (uses Playwright session-interception)[cite: 1699, 2335].
+- **SQLite positional params:** `db.prepare(...).get(Array.from(set))` — NOT `.get(...Array.from(set))`. Spreading a Set/Array as rest args silently binds only the first value; pass a single array.
+- **Suburb filter discrepancy:** `workspace/backfill-contacts.js` covers 9 suburbs (core farm). `daily-planner.js` covers 12 (adds NORTHBRIDGE, LANE COVE, ST LEONARDS, CROWS NEST). Contacts from the extra 4 suburbs get minimal stubs in `contacts`, no RP enrichment.
+- **lucide-react CDN (index.html):** `lucide-react` UMD factory looks for `global.react` (lowercase). React CDN sets `window.React` (uppercase). Fix: add `<script>window.react = window.React;</script>` **before** the lucide-react script tag. Global destructure: `const { Phone, ... } = LucideReact;` (PascalCase).
+- **Playwright on VPS root:** Global install at `/usr/lib/node_modules/playwright`. Launch flags required: `args: ['--no-sandbox', '--disable-dev-shm-usage']`. Pricefinder lookup: `node workspace/pricefinder-lookup.js` (batch) or `node workspace/pricefinder-lookup.js --address "123 Main St"` (single).
 
 ## 🔌 Active Plugins
 Plugins installed and their primary use in this system:
