@@ -31,11 +31,5 @@
       "command": "cd /root/.openclaw/workspace && node daily-planner.js >> /root/.openclaw/workspace/daily-planner.log 2>&1",
       "enabled": true
     },
-    {
-      "name": "notion-pipeline-watcher",
-      "schedule": "*/30 * * * *",
-      "command": "node /root/.openclaw/skills/agentbox-willoughby/notion-pipeline-watcher.js",
-      "enabled": true
-    }
   ]
 }

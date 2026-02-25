@@ -4,6 +4,7 @@ const fs      = require('fs');
 const path    = require('path');
 const https   = require('https');
 const http    = require('http');
+const { spawn } = require('child_process');
 const { db }  = require('./lib/db.js');
 const multer  = require('multer');
 const axios   = require('axios');
@@ -747,6 +748,38 @@ app.patch('/api/buyers/:id/done', requireAuth, (req, res) => {
     console.error('[PATCH /api/buyers/:id/done]', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// POST /api/buyers/sync — spawn fetch-buyer-enquiries.js in background
+const buyerSync = { running: false, startedAt: null, log: [], exitCode: null };
+app.post('/api/buyers/sync', requireAuth, (req, res) => {
+  if (buyerSync.running) {
+    return res.json({ ok: false, message: 'Sync already running', state: buyerSync });
+  }
+  buyerSync.running  = true;
+  buyerSync.startedAt = new Date().toISOString();
+  buyerSync.log      = [];
+  buyerSync.exitCode = null;
+
+  const child = spawn(
+    'node',
+    ['fetch-buyer-enquiries.js'],
+    { cwd: '/root/.openclaw/skills/agentbox-willoughby', env: process.env }
+  );
+  child.stdout.on('data', d => buyerSync.log.push(d.toString().trimEnd()));
+  child.stderr.on('data', d => buyerSync.log.push('ERR: ' + d.toString().trimEnd()));
+  child.on('close', code => {
+    buyerSync.running  = false;
+    buyerSync.exitCode = code;
+    console.log(`[buyers/sync] exited with code ${code}`);
+  });
+
+  res.json({ ok: true, message: 'Sync started', startedAt: buyerSync.startedAt });
+});
+
+// GET /api/buyers/sync/status
+app.get('/api/buyers/sync/status', requireAuth, (req, res) => {
+  res.json(buyerSync);
 });
 
 // POST /api/intel/upload

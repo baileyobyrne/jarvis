@@ -699,6 +699,14 @@ function BuyersPage({ token }) {
   const [grouped, setGrouped] = useState({});
   const [loading, setLoading] = useState(true);
   const [outcomeTarget, setOutcomeTarget] = useState(null); // buyer id
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState('');
+  const syncPollRef = useRef(null);
+
+  const loadBuyers = useCallback(async () => {
+    const res = await apiFetch('/api/buyers/calllist', token);
+    if (res.ok) setGrouped(await res.json());
+  }, [token]);
 
   useEffect(() => {
     apiFetch('/api/buyers/calllist', token)
@@ -707,6 +715,31 @@ function BuyersPage({ token }) {
       .catch(() => setLoading(false));
   }, [token]);
 
+  // Poll sync status while running
+  useEffect(() => {
+    if (!syncing) return;
+    syncPollRef.current = setInterval(async () => {
+      const res = await apiFetch('/api/buyers/sync/status', token);
+      if (!res.ok) return;
+      const s = await res.json();
+      if (!s.running) {
+        clearInterval(syncPollRef.current);
+        setSyncing(false);
+        const last = s.log[s.log.length - 1] || '';
+        setSyncMsg(s.exitCode === 0 ? '✅ Sync complete' : `⚠️ Sync ended: ${last}`);
+        await loadBuyers();
+        setTimeout(() => setSyncMsg(''), 5000);
+      }
+    }, 3000);
+    return () => clearInterval(syncPollRef.current);
+  }, [syncing, token, loadBuyers]);
+
+  const handleSync = async () => {
+    setSyncing(true);
+    setSyncMsg('Syncing with AgentBox…');
+    await apiFetch('/api/buyers/sync', token, { method: 'POST' });
+  };
+
   const logBuyerOutcome = async (buyerId, outcome) => {
     try {
       await apiFetch(`/api/buyers/${buyerId}/outcome`, token, {
@@ -714,9 +747,7 @@ function BuyersPage({ token }) {
         body: JSON.stringify({ outcome, notes: '' })
       });
       setOutcomeTarget(null);
-      // Refresh
-      const res = await apiFetch('/api/buyers/calllist', token);
-      if (res.ok) setGrouped(await res.json());
+      await loadBuyers();
     } catch (err) { console.error(err); }
   };
 
@@ -740,11 +771,17 @@ function BuyersPage({ token }) {
 
   return (
     <div className="page-body">
+      <div className="buyers-toolbar">
+        <button className="topup-btn" onClick={handleSync} disabled={syncing}>
+          {syncing ? 'Syncing…' : '↻ Sync from AgentBox'}
+        </button>
+        {syncMsg && <span className="sync-msg">{syncMsg}</span>}
+      </div>
       {addresses.length === 0 ? (
         <div className="empty-state">
           <div className="empty-state-icon"><Users size={32} /></div>
           <div className="empty-state-title">No active buyer enquiries</div>
-          <div className="empty-state-sub">Buyers will appear when enquiries are logged</div>
+          <div className="empty-state-sub">Press "Sync from AgentBox" to pull the latest enquiries</div>
         </div>
       ) : (
         addresses.map(addr => (
@@ -756,11 +793,11 @@ function BuyersPage({ token }) {
             </div>
             {grouped[addr].map(buyer => (
               <div className="buyer-row" key={buyer.id}>
-                <div className="buyer-name">{buyer.name || buyer.buyer_name || 'Unknown'}</div>
-                {buyer.mobile && (
-                  <a className="buyer-mobile" href={`tel:${buyer.mobile}`}>
+                <div className="buyer-name">{buyer.buyer_name || buyer.name || 'Unknown'}</div>
+                {(buyer.buyer_mobile || buyer.mobile) && (
+                  <a className="buyer-mobile" href={`tel:${buyer.buyer_mobile || buyer.mobile}`}>
                     <Phone size={11} style={{ marginRight: 3, verticalAlign: 'middle' }} />
-                    {buyer.mobile}
+                    {buyer.buyer_mobile || buyer.mobile}
                   </a>
                 )}
                 {buyer.enquiry_type && (

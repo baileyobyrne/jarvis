@@ -1248,6 +1248,23 @@ body::before {
   padding: 8px 14px;
 }
 
+/* ── Buyers toolbar ───────────────────────────────────────────────────────── */
+.buyers-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 0 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+
+.sync-msg {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--gold);
+  opacity: 0.85;
+}
+
 /* ── Mobile bottom nav ────────────────────────────────────────────────────── */
 .mobile-header {
   display: none;

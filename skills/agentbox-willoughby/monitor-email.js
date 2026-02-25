@@ -4,7 +4,9 @@ const { simpleParser } = require('mailparser');
 const { getProximityContacts } = require('./get-contacts.js');
 const fs = require('fs');
 const https = require('https');
-const { Client } = require('@notionhq/client');
+
+// ─── SQLite database (shared Jarvis data layer) ───────────────────────────────
+const { db } = require('../../lib/db.js');
 
 const SEEN_FILE        = '/root/.openclaw/workspace/seen-listings.json';
 const CONTACTS_FILE    = '/root/.openclaw/workspace/willoughby-contacts.json';
@@ -14,9 +16,6 @@ let seen = fs.existsSync(SEEN_FILE)
   : { listings: [], sold: [], emailIds: [], addresses: [] };
 if (!seen.emailIds) seen.emailIds = [];
 if (!seen.addresses) seen.addresses = [];
-
-const notion = new Client({ auth: process.env.NOTION_API_KEY });
-const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
 
 async function sendTelegram(message) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -163,6 +162,324 @@ function parseTheAgencyAlert(body) {
   return results;
 }
 
+// ─── SQLITE HELPERS ───────────────────────────────────────────────────────────
+
+/**
+ * Extract the suburb from an address string.
+ * Handles both "Street, Suburb" (Proping) and "STREET SUBURB NSW POSTCODE" (CoreLogic) formats.
+ */
+function extractSuburb(address) {
+  if (!address) return '';
+  const commaIdx = address.lastIndexOf(',');
+  if (commaIdx !== -1) {
+    // "26/166 Mowbray Road, Willoughby" → "Willoughby"
+    return address.slice(commaIdx + 1).trim().replace(/\s+NSW.*$/i, '').replace(/\s+\d{4}.*$/, '').trim();
+  }
+  // "31 WALTER STREET WILLOUGHBY NSW 2068" — scan for known suburb
+  const m = address.match(/\b(Willoughby|North Willoughby|Willoughby East|Northbridge|Castlecrag|Middle Cove|Castle Cove|Naremburn|Artarmon|Chatswood)\b/i);
+  return m ? m[1] : '';
+}
+
+// Lazy-initialised prepared statement — prepared once on first call.
+let _insertMarketEventStmt = null;
+
+/**
+ * Write one market event to the market_events SQLite table.
+ * Uses INSERT OR IGNORE — safe to call multiple times for the same event.
+ * Never throws; errors are logged non-fatally.
+ *
+ * @param {object} event   - Normalised event object (fields from any parser track).
+ * @param {Array}  [topContacts] - Optional [{name, mobile}] array for proximity contacts.
+ */
+function writeMarketEvent(event, topContacts) {
+  if (!_insertMarketEventStmt) {
+    _insertMarketEventStmt = db.prepare(`
+      INSERT OR IGNORE INTO market_events
+        (detected_at, event_date, type, address, suburb,
+         price, price_previous, price_withheld,
+         proping_estimate, estimate_delta, days_on_market,
+         beds, baths, cars, property_type,
+         agent_name, agency, source, is_rental, top_contacts)
+      VALUES
+        (@detected_at, @event_date, @type, @address, @suburb,
+         @price, @price_previous, @price_withheld,
+         @proping_estimate, @estimate_delta, @days_on_market,
+         @beds, @baths, @cars, @property_type,
+         @agent_name, @agency, @source, @is_rental, @top_contacts)
+    `);
+  }
+
+  const detectedAt = new Date().toISOString();
+  const rawDate    = event.eventDate || event.receivedDate;
+  const eventDate  = rawDate
+    ? (rawDate.length > 10 ? rawDate.substring(0, 10) : rawDate)
+    : detectedAt.substring(0, 10);
+
+  try {
+    _insertMarketEventStmt.run({
+      detected_at:      detectedAt,
+      event_date:       eventDate,
+      type:             event.type || event.eventType || null,
+      address:          event.address,
+      suburb:           event.suburb || extractSuburb(event.address || ''),
+      price:            event.price || event.listPrice || event.soldPrice || null,
+      price_previous:   event.price_previous || null,
+      price_withheld:   event.priceWithheld ? 1 : 0,
+      proping_estimate: event.propingEstimate || event.proping_estimate || null,
+      estimate_delta:   event.estimateDelta  || event.estimate_delta  || null,
+      days_on_market:   (event.daysOnMarket  != null) ? event.daysOnMarket
+                      : (event.days_on_market != null ? event.days_on_market : null),
+      beds:             event.beds           || null,
+      baths:            event.baths          || null,
+      cars:             event.cars           || null,
+      property_type:    event.propertyType   || event.property_type || null,
+      agent_name:       event.agentName      || event.agent_name    || null,
+      agency:           event.agency         || null,
+      source:           event.source         || 'Unknown',
+      is_rental:        event.isRental       ? 1 : 0,
+      top_contacts:     topContacts          ? JSON.stringify(topContacts) : null
+    });
+  } catch (err) {
+    console.error('[db] market_events write failed (non-fatal):', err.message);
+  }
+}
+
+// ─── PROPING PARSER ───────────────────────────────────────────────────────────
+
+/**
+ * Parse a Proping daily digest email body.
+ *
+ * Sections detected: Price Change(N) | Newly Listed(N) | Sold(N) | Unlisted(N)
+ * Each property block contains: address, beds+DOM line, price line, [price-withheld], agent/agency.
+ *
+ * @param {string} subject      - Email subject (unused for parsing, kept for API parity).
+ * @param {string} body         - Plain-text email body.
+ * @param {string} receivedDate - YYYY-MM-DD string (Sydney date when email was processed).
+ * @returns {Array<object>}     - One object per property found.
+ */
+function parseProping(subject, body, receivedDate) {
+  const results = [];
+
+  const sectionTypeMap = {
+    'price change': 'price_change',
+    'newly listed': 'listing',
+    'sold':         'sold',
+    'unlisted':     'unlisted'
+  };
+
+  // Split body on section headers.  Using a capturing group means the split array
+  // alternates: [pre-text, header, content, header, content, ...]
+  const parts = body.split(/^(Price Change|Newly Listed|Sold|Unlisted)\s*\(\d+\)\s*$/mi);
+
+  // parts[0] = anything before the first section (ignored)
+  // parts[1] = first header name, parts[2] = first section content, etc.
+  for (let i = 1; i < parts.length; i += 2) {
+    const sectionName = parts[i].toLowerCase().trim();
+    const sectionContent = (parts[i + 1] || '');
+    const sectionType = sectionTypeMap[sectionName];
+    if (!sectionType) continue;
+
+    // Filter and split section content into non-empty lines
+    const lines = sectionContent.split('\n').map(l => l.trim()).filter(Boolean);
+
+    // Detect the start of a new property block.
+    // Address lines: start with a digit, contain a comma (suburb separator),
+    // and do NOT contain '$' or 'bed' (which would identify a price or beds line).
+    const isAddressLine = (line) =>
+      /^\d/.test(line) &&
+      /,/.test(line) &&
+      !/\$/.test(line) &&
+      !/\bbed\b/i.test(line);
+
+    let currentBlock = [];
+
+    const flushBlock = () => {
+      if (currentBlock.length < 3) { currentBlock = []; return; }
+
+      // ── Line 0: address ────────────────────────────────────────────────────
+      const address = currentBlock[0];
+      const suburb = extractSuburb(address);
+
+      // ── Line 1: beds + days on market ──────────────────────────────────────
+      const bedsLine = currentBlock[1] || '';
+      const bedsMatch    = bedsLine.match(/(\d+)\s*bed/i);
+      const daysMatch    = bedsLine.match(/(\d+)\s*days?\s*listed/i);
+      const beds         = bedsMatch ? bedsMatch[1] : '';
+      const daysOnMarket = daysMatch ? parseInt(daysMatch[1], 10) : null;
+
+      // ── Line 2: price line ─────────────────────────────────────────────────
+      let lineIdx = 2;
+      const priceLine = currentBlock[lineIdx] || '';
+
+      // Proping estimate: first $X,XXX before "Proping Estimate"
+      const estMatch = priceLine.match(/\$([\d,]+)\s+Proping\s+Estimate/i);
+      const propingEstimate = estMatch ? `$${estMatch[1]}` : null;
+
+      // Any additional dollar amount appearing AFTER the estimate marker
+      const afterMarker = estMatch
+        ? priceLine.slice(priceLine.search(/Proping\s+Estimate\*/i) + 'Proping Estimate*'.length).trim()
+        : '';
+      const secondAmtMatch = afterMarker.match(/\$([\d,]+)/);
+
+      // For listings, the second amount (if present) is the actual list price;
+      // for price_change the second amount is the change delta — not a list price.
+      let listPrice      = null;
+      let estimateDelta  = null;
+
+      if (sectionType === 'listing' && secondAmtMatch) {
+        listPrice = `$${secondAmtMatch[1]}`;
+      }
+
+      if (listPrice && propingEstimate) {
+        const lpNum = parseInt(listPrice.replace(/[\$,]/g, ''), 10);
+        const epNum = parseInt(propingEstimate.replace(/[\$,]/g, ''), 10);
+        const delta = lpNum - epNum;
+        estimateDelta = (delta >= 0 ? '+' : '-') + '$' + Math.abs(delta).toLocaleString('en-AU');
+      }
+
+      lineIdx++;
+
+      // ── Sold: check for explicit price or "Price Withheld" ─────────────────
+      let soldPrice    = null;
+      let priceWithheld = false;
+
+      if (sectionType === 'sold') {
+        const nextLine = currentBlock[lineIdx] || '';
+        if (/price withheld/i.test(nextLine)) {
+          priceWithheld = true;
+          soldPrice     = 'Price Withheld';
+          lineIdx++;
+        } else {
+          const soldPriceMatch = nextLine.match(/^\$[\d,]+/);
+          if (soldPriceMatch) {
+            soldPrice = soldPriceMatch[0];
+            lineIdx++;
+          }
+        }
+      }
+
+      // ── Agent / Agency ─────────────────────────────────────────────────────
+      const agentLine = currentBlock[lineIdx] || '';
+      let agentName = '';
+      let agency    = '';
+      if (agentLine.includes('/')) {
+        const agentParts = agentLine.split('/');
+        agentName = agentParts[0].trim();
+        agency    = agentParts.slice(1).join('/').trim();
+      } else {
+        agentName = agentLine.trim();
+      }
+
+      results.push({
+        type:             sectionType,
+        address,
+        suburb,
+        beds,
+        daysOnMarket,
+        listPrice,
+        soldPrice:        sectionType === 'sold' ? soldPrice : null,
+        priceWithheld,
+        propingEstimate,
+        estimateDelta,
+        agentName,
+        agency,
+        eventDate:        receivedDate,
+        source:           'Proping'
+      });
+
+      currentBlock = [];
+    };
+
+    for (const line of lines) {
+      if (isAddressLine(line) && currentBlock.length > 0) {
+        flushBlock();
+      }
+      currentBlock.push(line);
+    }
+    flushBlock(); // flush the last block in this section
+  }
+
+  return results;
+}
+
+// ─── PROPING PROCESSING ───────────────────────────────────────────────────────
+
+/**
+ * Build the consolidated Telegram message for a Proping daily digest.
+ */
+function buildPropingTelegramSummary(events, receivedDate) {
+  const listings     = events.filter(e => e.type === 'listing');
+  const sold         = events.filter(e => e.type === 'sold');
+  const priceChanges = events.filter(e => e.type === 'price_change');
+  const unlisted     = events.filter(e => e.type === 'unlisted');
+
+  const pl = (n, w) => `${n} ${w}${n !== 1 ? 's' : ''}`;
+
+  let msg = `📊 PROPING DAILY DIGEST — ${receivedDate}\n`;
+  msg += `🆕 NEW: ${pl(listings.length, 'listing')}\n`;
+  msg += `💰 SOLD: ${pl(sold.length, 'sale')}\n`;
+  msg += `📉 PRICE CHANGE: ${pl(priceChanges.length, 'adjustment')}\n`;
+  msg += `🚫 UNLISTED: ${pl(unlisted.length, 'withdrawn')}`;
+
+  if (unlisted.length > 0) {
+    msg += '\n\n🚫 WITHDRAWN — potential motivated vendor:';
+    for (const u of unlisted) {
+      const domStr = u.daysOnMarket != null ? `${u.daysOnMarket}DOM` : 'DOM unknown';
+      const estStr = u.propingEstimate || 'est. unknown';
+      msg += `\n• ${u.address} — ${u.beds}bed — ${domStr} — Est. ${estStr}`;
+      const agentStr = [u.agentName, u.agency].filter(Boolean).join(' / ');
+      if (agentStr) msg += `\n  ${agentStr}`;
+    }
+  }
+
+  msg += '\n\nOpen your Jarvis dashboard for full details.';
+  return msg;
+}
+
+/**
+ * Process a batch of Proping events:
+ *   1. Write each to market_events (INSERT OR IGNORE)
+ *   2. Send (or in test mode, print) one consolidated Telegram summary
+ *
+ * @param {Array}   propingEvents - Parsed Proping event objects.
+ * @param {string}  receivedDate  - YYYY-MM-DD for the Telegram header.
+ * @param {boolean} [testMode]    - If true, print Telegram message instead of sending.
+ * @returns {number} Number of net-new rows written to SQLite.
+ */
+async function processProping(propingEvents, receivedDate, testMode) {
+  if (propingEvents.length === 0) {
+    console.log('  → [Proping] No events to process.');
+    return 0;
+  }
+
+  const beforeCount = db.prepare('SELECT COUNT(*) AS c FROM market_events WHERE source = ?')
+    .get('Proping').c;
+
+  for (const event of propingEvents) {
+    writeMarketEvent(event);
+    console.log(`  → [Proping] ${event.type.toUpperCase()} @ ${event.address}`);
+  }
+
+  const afterCount = db.prepare('SELECT COUNT(*) AS c FROM market_events WHERE source = ?')
+    .get('Proping').c;
+  const newRows = afterCount - beforeCount;
+  console.log(`  → [Proping] ${newRows} new rows written to market_events.`);
+
+  const summary = buildPropingTelegramSummary(propingEvents, receivedDate);
+
+  if (testMode) {
+    console.log('\n[test-proping] Telegram summary (NOT sent in test mode):');
+    console.log('─'.repeat(55));
+    console.log(summary);
+    console.log('─'.repeat(55));
+  } else {
+    await sendTelegram(summary);
+    console.log('  → [Proping] Consolidated Telegram digest sent.');
+  }
+
+  return newRows;
+}
+
 // ─── CORELOGIC PIPELINE ──────────────────────────────────────────────────────
 
 // Writes occupancy: "Investor" onto any contact whose address matches the
@@ -265,15 +582,6 @@ function parseCoreLogicAlerts(subject, body) {
   }
 
   // ── Format C: Watchlist sections ─────────────────────────────────────────────
-  // Sent by CoreLogic/Cotality with section headings like:
-  //   "Watchlist - Listing Price Changes"
-  //   "Watchlist - Sold"
-  //   "Watchlist - For Rent"
-  // Each property block inside looks like:
-  //   [image URL]
-  //   31 WALTER STREET WILLOUGHBY NSW 2068
-  //   List: Willoughby – For Sale
-  //   Sale price $2,875,000
   const watchlistDefs = [
     { pattern: /Watchlist\s*[-–]\s*Listing\s*(?:Price\s*Changes?|Alerts?)([\s\S]*?)(?=Watchlist\s*[-–]|You are receiving|$)/i, type: 'listing', label: 'CoreLogic Watchlist Listed' },
     { pattern: /Watchlist\s*[-–]\s*(?:Sold|Recent\s*Sales?)([\s\S]*?)(?=Watchlist\s*[-–]|You are receiving|$)/i,               type: 'sold',    label: 'CoreLogic Watchlist Sold'   },
@@ -342,52 +650,8 @@ function parseCoreLogicAlerts(subject, body) {
   return results;
 }
 
-// Sends a payload array directly to Notion as database pages.
-async function sendToNotion(payload) {
-  let success = 0;
-  let failed = 0;
-  for (const contact of payload) {
-    try {
-      await notion.pages.create({
-        parent: { database_id: NOTION_DATABASE_ID },
-        properties: {
-          'Contact Name': { title: [{ text: { content: contact.Name || '' } }] },
-          'Property Address': { rich_text: [{ text: { content: contact.Address || '' } }] },
-          'Mobile': { phone_number: contact.Mobile || null },
-          'Propensity Score': { number: contact.Score },
-          'AI Strategy': { rich_text: [{ text: { content: contact.StrategicTalkingPoint || '' } }] },
-          'Source': { select: { name: contact.Source || 'Market Event' } },
-          'Tenure': { rich_text: [{ text: { content: contact.Tenure || '' } }] },
-          'Status': { status: { name: '🎯 To Call Today' } }
-        },
-        children: [
-          {
-            object: 'block',
-            type: 'paragraph',
-            paragraph: {
-              rich_text: [
-                {
-                  type: 'text',
-                  text: {
-                    content: contact.StrategicTalkingPoint || ''
-                  }
-                }
-              ]
-            }
-          }
-        ]
-      });
-      success++;
-    } catch (err) {
-      console.error(`  → Notion error for ${contact.Name}: ${err.message}`);
-      failed++;
-    }
-  }
-  console.log(`  → Notion write: ${success} created, ${failed} failed.`);
-}
-
 // Full pipeline for a single CoreLogic address:
-// proximity match → score → AI strategy → Make.com webhook
+// proximity match → score → listing-alerts.json + SQLite market_events
 async function processCoreLogicListing(details, rpMap) {
   const address = details.address;
   const listingCategory = categorizePropertyType(details.propertyType || 'House');
@@ -409,23 +673,41 @@ async function processCoreLogicListing(details, rpMap) {
 
   if (top10.length === 0) {
     console.log(`  → No scored contacts found near ${address}`);
+    // Still write the market event even with no top contacts
+    writeMarketEvent(details, []);
     return;
   }
 
-  console.log(`  → Sending ${top10.length} CoreLogic contacts to Notion...`);
-  const payload = top10.map(c => ({
-    Name: c.name,
-    Mobile: c.mobile,
-    Address: `${c.address || ''}, ${c.suburb || ''}`.trim().replace(/,\s*$/, ''),
-    Score: c.propensityScore,
-    StrategicTalkingPoint:
-      `🚨 URGENT MARKET EVENT:\n📌 TRIGGER: A property nearby at ${address} just ${details.type === 'sold' ? 'sold' : 'listed'}.\n🎯 ANGLE: Call to provide instant market context and validate their equity.`,
-    Source: 'Market Event',
-    Tenure: c.tenure ? `${c.tenure} years` : 'Unknown'
-  }));
+  const topContacts = top10.slice(0, 5).map(c => ({ name: c.name, mobile: c.mobile || '' }));
 
-  await sendToNotion(payload);
-  console.log(`  ✅ CoreLogic → Notion: ${payload.length} contacts for ${address}`);
+  // Write to listing-alerts.json for the dashboard
+  try {
+    const ALERTS_FILE = '/root/.openclaw/workspace/listing-alerts.json';
+    const newEntry = {
+      detectedAt: new Date().toISOString(),
+      type:       details.type,
+      address,
+      price:      details.price  || '',
+      beds:       details.beds   || '',
+      baths:      details.baths  || '',
+      cars:       details.cars   || '',
+      source:     'CoreLogic',
+      topContacts
+    };
+    let alerts = [];
+    if (fs.existsSync(ALERTS_FILE)) {
+      try { alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8')); } catch (_) { alerts = []; }
+    }
+    alerts.push(newEntry);
+    alerts = alerts.slice(-20);
+    fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
+    console.log(`  ✅ CoreLogic → dashboard alert: ${top10.length} contacts for ${address}`);
+  } catch (e) {
+    console.error('  → Alert log write failed:', e.message);
+  }
+
+  // Write to SQLite market_events (Part B — CoreLogic track)
+  writeMarketEvent(details, topContacts);
 }
 
 // ─── ROUTING ─────────────────────────────────────────────────────────────────
@@ -452,6 +734,14 @@ function routeEmail(subject, body, from) {
   if (sender.includes('hello@theagency.com.au') && /matched properties/i.test(subject)) {
     return parseTheAgencyAlert(body);
   }
+
+  // ── Proping daily digest ──────────────────────────────────────────────────
+  if (sender.includes('proping@proping.com.au') || /Changes in Your Market/i.test(subject)) {
+    const receivedDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+    return parseProping(subject, body, receivedDate);
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   const isCoreLogicContent =
     sender.includes('corelogic.com.au') ||
     /fw:.*(?:rp\s*data|your rp data)/i.test(subject) ||
@@ -476,7 +766,7 @@ const { loadRPData, normalise, normaliseSuburb, calculatePropensityScore, catego
 
 async function generateCallStrategy(contact, listingAddress, details) {
   const distStr = contact.distance !== null ? `${contact.distance}m` : 'nearby';
-  
+
   const prompt = `
 You are a highly strategic real estate analyst. Generate a punchy, 1-sentence strategic reason to call this contact because a new property has just been listed/sold nearby.
 
@@ -516,11 +806,11 @@ Output ONLY the 1-sentence strategy.`;
 async function buildContactList(address, details, rpMap) {
   const listingCategory = categorizePropertyType(details.propertyType || 'House'); // Default to House if unknown
   const proximityContacts = await getProximityContacts(address, 200); // Increase pool size since we filter strictly
-  
+
   const scoredContacts = proximityContacts.map(c => {
     const key = normalise(c.address) + '|' + normaliseSuburb(c.suburb);
     const rpData = rpMap.get(key);
-    
+
     // 3. PROPERTY TYPE MATCHING (Apples to Apples)
     if (!rpData) return null;
     const contactCategory = categorizePropertyType(rpData.propertyType);
@@ -534,35 +824,14 @@ async function buildContactList(address, details, rpMap) {
     .sort((a, b) => b.propensityScore - a.propensityScore)
     .slice(0, 30);
 
-  // ─── URGENT MARKET EVENT → NOTION (direct write, no board limit) ────────────
-  if (top30.length > 0) {
-    const notionPayload = top30.map(c => ({
-      Name: c.name,
-      Mobile: c.mobile,
-      Address: `${c.address || ''}, ${c.suburb || ''}`.trim().replace(/,\s*$/, ''),
-      Score: c.propensityScore,
-      StrategicTalkingPoint:
-        `🚨 URGENT MARKET EVENT:\n📌 TRIGGER: A property nearby at ${address} just ${details.type === 'sold' ? 'sold' : 'listed'}.\n🎯 ANGLE: Call to provide instant market context and validate their equity.`,
-      Source: 'Market Event',
-      Tenure: c.tenure ? `${c.tenure} years` : 'Unknown'
-    }));
-    try {
-      await sendToNotion(notionPayload);
-      console.log(`  ✅ Market event → Notion: ${notionPayload.length} contacts pushed.`);
-    } catch (e) {
-      console.error('  → Notion write failed:', e.message);
-    }
-  }
-  // ─────────────────────────────────────────────────────────────────────────────
-
   const formatted = [];
   console.log(`Generating AI Strategies for ${top30.length} contacts...`);
-  
+
   for (let i = 0; i < top30.length; i++) {
     const c = top30[i];
     const distStr = c.distance !== null ? ` (${c.distance}m)` : '';
     const angle = await generateCallStrategy(c, address, details);
-    
+
     formatted.push(
       `<b>${c.name}</b> | <code>${c.mobile}</code>\n` +
       `${c.address || '—'}${distStr}\n` +
@@ -615,7 +884,8 @@ async function checkEmails() {
       'lindfield@stonerealestate.com.au',
       'jasongeorges@mcgrath.com.au',
       'noreply@corelogic.com.au',
-      'baileyobyrne@mcgrath.com.au'
+      'baileyobyrne@mcgrath.com.au',
+      'proping@proping.com.au'         // Proping daily digest
     ];
 
     const keywordSubjects = [
@@ -629,7 +899,8 @@ async function checkEmails() {
       'price guide',
       'Penshurst',
       'RP Data',
-      'Your RP Data'
+      'Your RP Data',
+      'Changes in Your Market'         // Proping subject line
     ];
 
     let allMessageUids = new Set();
@@ -645,7 +916,6 @@ async function checkEmails() {
 
     for (const keyword of keywordSubjects) {
       const msgs = await client.search(process.env.SEARCH_ALL ? { subject: keyword } : { subject: keyword, seen: false });
-      // Pre-filter by area before adding — avoids fetching irrelevant emails
       msgs.forEach(uid => allMessageUids.add(uid));
     }
 
@@ -671,8 +941,8 @@ async function checkEmails() {
 
       const parsed = await simpleParser(msg.source);
       const subject = parsed.subject || '';
-      const body = parsed.text || '';
-      const from = parsed.from?.text || '';
+      const body    = parsed.text    || '';
+      const from    = parsed.from?.text || '';
 
       // CoreLogic territory alerts are pre-scoped to our area — skip the suburb filter
       const fromSender = from.toLowerCase();
@@ -681,7 +951,12 @@ async function checkEmails() {
         /fw:.*(?:rp\s*data|your rp data)/i.test(subject) ||
         (fromSender.includes('baileyobyrne@mcgrath.com.au') && /rp\s*data|corelogic/i.test(subject));
 
-      if (!isCoreLogicEmail && !isWilloughbyArea(subject + body)) {
+      // Proping emails contain Australia-wide data — let routeEmail filter; no area check needed
+      const isPropingEmail =
+        fromSender.includes('proping@proping.com.au') ||
+        /Changes in Your Market/i.test(subject);
+
+      if (!isCoreLogicEmail && !isPropingEmail && !isWilloughbyArea(subject + body)) {
         console.log(`  → Skipped: Property not in Willoughby: ${subject}`);
         continue;
       }
@@ -694,6 +969,16 @@ async function checkEmails() {
         console.log('  → No parseable listings found');
         continue;
       }
+
+      // ── PROPING TRACK: batch process entire digest, one Telegram summary ────
+      if (detailsList[0]?.source === 'Proping') {
+        const receivedDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+        await processProping(detailsList, receivedDate, false);
+        found += detailsList.length;
+        fs.writeFileSync(SEEN_FILE, JSON.stringify(seen, null, 2));
+        continue;
+      }
+      // ────────────────────────────────────────────────────────────────────────
 
       for (const details of detailsList) {
         if (!details.address) {
@@ -708,7 +993,7 @@ async function checkEmails() {
         }
         seen.addresses.push(dedupKey);
 
-        // CoreLogic alerts bypass Telegram and go directly to Notion
+        // ── CORELOGIC TRACK: bypass Telegram, write to alerts JSON + SQLite ──
         if (details.source === 'CoreLogic') {
           await processCoreLogicListing(details, rpMap);
           found++;
@@ -716,14 +1001,49 @@ async function checkEmails() {
           continue;
         }
 
-        // Push scored neighbours to Notion
-        await buildContactList(details.address, details, rpMap);
+        // ── NON-CORELOGIC TRACK: AI strategies + Telegram + JSON + SQLite ───
+        const _alertContacts = await buildContactList(details.address, details, rpMap);
 
-        // Send a single concise heads-up to Telegram — contact lists now live in Notion
+        // Extract top contacts for both JSON and SQLite writes
+        const topContacts = (_alertContacts || []).slice(0, 5).map(str => {
+          const nm = str.match(/<b>(.+?)<\/b>/);
+          const mb = str.match(/<code>(.+?)<\/code>/);
+          return { name: nm?.[1] || '', mobile: mb?.[1] || '' };
+        }).filter(c => c.name);
+
+        // Send a single concise heads-up to Telegram (Part C — updated message)
         const alertMsg =
           `🚨 URGENT MARKET EVENT: A property at ${details.address} just ${details.type === 'sold' ? 'sold' : 'listed'}.\n\n` +
-          `🎯 The nearest high-priority neighbours have been pushed to the top of your Notion Command Center!`;
+          `Open your Jarvis dashboard to see the top neighbours to call.`;
         await sendTelegram(alertMsg);
+
+        // Log alert to listing-alerts.json for the dashboard (unchanged)
+        try {
+          const ALERTS_FILE = '/root/.openclaw/workspace/listing-alerts.json';
+          const newEntry = {
+            detectedAt: new Date().toISOString(),
+            type:       details.type,
+            address:    details.address,
+            price:      details.price  || '',
+            beds:       details.beds   || '',
+            baths:      details.baths  || '',
+            cars:       details.cars   || '',
+            source:     details.source,
+            topContacts
+          };
+          let alerts = [];
+          if (fs.existsSync(ALERTS_FILE)) {
+            try { alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8')); } catch (_) { alerts = []; }
+          }
+          alerts.push(newEntry);
+          alerts = alerts.slice(-20);
+          fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
+        } catch (e) {
+          console.error('  → Alert log write failed (non-fatal):', e.message);
+        }
+
+        // Write to SQLite market_events (Part B — non-CoreLogic track)
+        writeMarketEvent(details, topContacts);
 
         console.log(`  ✅ Alert sent: ${details.address} [${details.type}] via ${details.source}`);
         found++;
@@ -746,4 +1066,76 @@ async function checkEmails() {
   }
 }
 
-checkEmails();
+// ─── TEST: --test-proping ──────────────────────────────────────────────────────
+
+async function testProping() {
+  console.log('[test-proping] Running Proping parser with hardcoded sample body...\n');
+
+  const receivedDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+
+  const sampleBody = `Price Change(1)
+26/166 Mowbray Road, Willoughby
+2 bed  7 Days listed
+$975,000 Proping Estimate*  $50,000
+Jason Georges / McGrath Willoughby
+Newly Listed(3)
+136/2 Artarmon Road, Willoughby
+2 bed  0 Days listed
+$1,500,000 Proping Estimate*
+Rick D'Amico / Forsyth Real Estate
+41 Tyneside Avenue, Willoughby
+5 bed  0 Days listed
+$3,800,000 Proping Estimate*
+Daniel Campbell / DiJones - Willoughby
+Sold(1)
+23 Wallace Street, Willoughby
+4 bed  23 Days listed
+$4,100,000 Proping Estimate*
+Price Withheld Sold Price
+Jason Conroy / The Agency North
+Unlisted(1)
+56 Tulloh Street, Willoughby
+4 bed  14 Days listed
+$4,200,000 Proping Estimate*
+Nicholas Dunn / McGrath Willoughby`;
+
+  const events = parseProping('Changes in Your Market', sampleBody, receivedDate);
+
+  console.log(`[test-proping] Parsed ${events.length} events:\n`);
+  events.forEach((e, i) => {
+    console.log(`  [${i + 1}] ${e.type.toUpperCase()} @ ${e.address}`);
+    console.log(`       suburb=${e.suburb} beds=${e.beds} DOM=${e.daysOnMarket}`);
+    console.log(`       estimate=${e.propingEstimate} priceWithheld=${e.priceWithheld}`);
+    console.log(`       agent="${e.agentName}" / agency="${e.agency}"`);
+  });
+  console.log('');
+
+  // processProping writes to SQLite and prints (not sends) Telegram summary
+  const newRows = await processProping(events, receivedDate, true /* testMode */);
+
+  // Verification query — confirm rows in DB
+  const rows = db.prepare(
+    `SELECT address, type, event_date FROM market_events WHERE source = 'Proping' AND event_date = ?`
+  ).all(receivedDate);
+
+  console.log(`\n[test-proping] Verification: market_events rows for ${receivedDate}:`);
+  rows.forEach(r => console.log(`  → [${r.type}] ${r.address}`));
+  console.log(`\n[test-proping] ${newRows} new rows inserted this run. ${rows.length} total Proping rows for today in market_events.`);
+
+  if (rows.length >= 5) {
+    console.log('[test-proping] ✅ PASS — at least 5 Proping rows confirmed in market_events.');
+  } else {
+    console.log(`[test-proping] ⚠️  Expected 5 rows, found ${rows.length}. (Duplicates are suppressed by INSERT OR IGNORE on repeated runs.)`);
+  }
+}
+
+// ─── ENTRY POINT ──────────────────────────────────────────────────────────────
+
+if (process.argv.includes('--test-proping')) {
+  testProping().catch(err => {
+    console.error('[test-proping] Fatal:', err.message);
+    process.exit(1);
+  });
+} else {
+  checkEmails();
+}

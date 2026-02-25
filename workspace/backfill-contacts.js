@@ -62,6 +62,9 @@ function calcScore(contact, rpEntry) {
   }
   if (contact.appraisals?.length > 0) score += 30;
   if (rpEntry?.['Owner Type'] === 'Rented') score += 15;
+  const contactClass = contact.contactClass || '';
+  if (contactClass.includes('Past Vendor')) score += 25;
+  if (contactClass.includes('Prospective Vendor') && !contactClass.includes('Past Vendor')) score += 15;
   return score;
 }
 

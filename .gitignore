@@ -24,6 +24,7 @@ rp_data.csv
 
 # ─── Runtime state files ──────────────────────────────────────────────────────
 recently-planned.json
+listing-alerts.json
 seen-listings.json
 geo-cache.json
 browser-state.json
@@ -35,6 +36,9 @@ update-check.json
 # ─── Logs ─────────────────────────────────────────────────────────────────────
 *.log
 logs/
+
+# ─── SSL certificates & private key ──────────────────────────────────────────
+ssl/
 
 # ─── Node modules ─────────────────────────────────────────────────────────────
 node_modules/
