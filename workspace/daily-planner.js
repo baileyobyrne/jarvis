@@ -191,7 +191,7 @@ Keep every bullet to one punchy line. No paragraphs. No fluff. No extra commenta
 // ─── SQLITE WRITE ─────────────────────────────────────────────────────────────
 // Runs after saveCooldown on every normal execution (and standalone in --dry-run).
 // If SQLite fails the error is logged but the script does NOT crash —
-// recently-planned.json remains the authoritative fallback throughout migration.
+// recently-planned.json is kept for the 90-day cooldown filter; SQLite is authoritative for board count.
 function writeToDB(finalPayload) {
     // en-CA locale gives YYYY-MM-DD, respecting Sydney timezone for plan_date
     const planDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
@@ -333,11 +333,11 @@ async function main() {
     const contacts = contactsData.contacts;
 
     // ─── BOARD STATE CHECK ───────────────────────────────────────────────────
+    const planDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
     const cooldown = loadCooldown();
-    const today = new Date().toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' });
-    const todayCount = Object.values(cooldown).filter(e =>
-        e.plannedAt && new Date(e.plannedAt).toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' }) === today
-    ).length;
+    const todayCount = db.prepare(
+        'SELECT COUNT(*) AS n FROM daily_plans WHERE plan_date = ?'
+    ).get(planDate).n;
     const targetCalls = DAILY_TARGET - todayCount;
     if (targetCalls <= 0) {
         console.log(`Board is full — ${todayCount} contacts already planned today. Nothing to do.`);
