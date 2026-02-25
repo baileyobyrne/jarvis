@@ -10,7 +10,7 @@ const CONTACTS_FILE = '/root/.openclaw/workspace/willoughby-contacts.json';
 const RP_DATA_FILE = '/root/.openclaw/workspace/rp_data.csv';
 const COOLDOWN_FILE = '/root/.openclaw/workspace/recently-planned.json';
 const COOLDOWN_DAYS = 90;         // days before a daily-planned contact is eligible again
-const DAILY_TARGET = 80;          // maximum cards on the board at any one time
+const DAILY_TARGET = 30;          // maximum cards on the board at any one time
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
 function normalizeSuburb(suburb) {
@@ -120,6 +120,17 @@ function calculateScore(contact, truthEntry) {
         score += 15;
     }
 
+    // 4. Past Vendor (+25 — previously listed/sold through McGrath)
+    const contactClass = contact.contactClass || '';
+    if (contactClass.includes('Past Vendor')) {
+        score += 25;
+    }
+
+    // 5. Prospective Vendor (+15 — flagged as potential seller, not already Past Vendor)
+    if (contactClass.includes('Prospective Vendor') && !contactClass.includes('Past Vendor')) {
+        score += 15;
+    }
+
     return score;
 }
 
@@ -141,7 +152,8 @@ async function generateTalkingPoint(contact, truthEntry) {
         tenureYears: tenureYears,
         ownerType: truthEntry?.['Owner Type'] || 'Unknown',
         appraisals: contact.appraisals?.length || 0,
-        notes: contact.notes?.map(n => n.description).join('; ') || 'None'
+        contactClass: contact.contactClass || 'Unknown',
+        notes: contact.notes?.map(n => [n.headline, n.description].filter(Boolean).join(' — ')).join('; ') || 'None'
     };
 
     const prompt = `You are a strategic real estate analyst generating a call prep brief for Bailey O'Byrne at McGrath Willoughby.
@@ -154,6 +166,7 @@ Data available:
 - Current Year: ${currentYear}
 - Tenure: ${context.tenure} (${context.tenureYears} years)
 - Owner Type: ${context.ownerType}
+- Contact Class: ${context.contactClass}
 - Past Appraisals: ${context.appraisals}
 - Notes: ${context.notes}
 

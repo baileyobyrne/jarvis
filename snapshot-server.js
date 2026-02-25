@@ -194,7 +194,7 @@ app.get('/api/status', (req, res) => {
       totalContacts: _contactsMap?.size ?? 0,
       todayCount,
       calledCount,
-      target:        80,
+      target:        30,
     });
   } catch (e) {
     res.status(500).json({ healthy: false, error: e.message });
@@ -404,6 +404,106 @@ app.get('/api/plan/today', requireAuth, (req, res) => {
     res.json(rows);
   } catch (e) {
     console.error('[GET /api/plan/today]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/plan/topup?n=10 — score & add N more contacts to today's plan on demand
+app.post('/api/plan/topup', requireAuth, (req, res) => {
+  try {
+    loadCache();
+    const n = Math.min(Math.max(parseInt(req.query.n) || 10, 1), 30);
+
+    const planDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+
+    // Contacts already on today's board
+    const plannedToday = new Set(
+      db.prepare("SELECT contact_id FROM daily_plans WHERE plan_date = ?").all(planDate).map(r => r.contact_id)
+    );
+
+    // Contacts on 90-day cooldown
+    const rawCooldown = fs.existsSync(COOLDOWN_FILE)
+      ? JSON.parse(fs.readFileSync(COOLDOWN_FILE, 'utf8'))
+      : {};
+    const now = Date.now();
+    const onCooldown = new Set(
+      Object.entries(rawCooldown)
+        .filter(([, e]) => now - new Date(e.plannedAt).getTime() < (e.cooldownDays || 90) * 86400000)
+        .map(([id]) => id)
+    );
+
+    // Score all eligible contacts
+    const scored = [];
+    for (const [id, contact] of _contactsMap) {
+      if (plannedToday.has(id) || onCooldown.has(id)) continue;
+      const street  = (contact.address || '').toUpperCase().trim();
+      const suburb  = normalizeSuburb(contact.suburb || '');
+      const rpKey   = `${street} ${suburb}`.trim();
+      const rpEntry = rpKey ? _rpMap?.get(rpKey) : null;
+      const score   = calcScore(contact, rpEntry);
+      if (score > 0) scored.push({ id, contact, rpEntry, score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    const topN = scored.slice(0, n);
+
+    const upsertContact = db.prepare(`
+      INSERT INTO contacts (id, name, mobile, address, suburb, propensity_score, created_at, updated_at)
+      VALUES (@id, @name, @mobile, @address, @suburb, @score, datetime('now'), datetime('now'))
+      ON CONFLICT(id) DO UPDATE SET
+        propensity_score = excluded.propensity_score,
+        updated_at       = datetime('now')
+    `);
+    const insertPlan = db.prepare(`
+      INSERT OR IGNORE INTO daily_plans
+        (plan_date, contact_id, propensity_score, intel, angle, tenure, property_type, occupancy, source, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'topup', datetime('now', 'localtime'))
+    `);
+
+    let added = 0;
+    const nowIso = new Date().toISOString();
+    const updatedCooldown = { ...rawCooldown };
+
+    for (const { id, contact, rpEntry, score } of topN) {
+      const saleDate    = rpEntry?.['Sale Date'] || '';
+      const saleYearM   = saleDate.match(/\d{4}/);
+      const tenureYears = saleYearM ? new Date().getFullYear() - parseInt(saleYearM[0]) : null;
+      const tenure      = tenureYears !== null ? `${tenureYears} years` : 'Unknown';
+
+      upsertContact.run({
+        id, score,
+        name:    contact.name    || 'Unknown',
+        mobile:  contact.mobile  || '',
+        address: contact.address || '',
+        suburb:  contact.suburb  || '',
+      });
+
+      const r = insertPlan.run(
+        planDate, id, score,
+        buildIntel(contact, rpEntry),
+        buildAngle(contact, rpEntry),
+        tenure,
+        rpEntry?.['Property Type'] || contact.propertyType || '',
+        rpEntry?.['Owner Type']    || contact.occupancy    || ''
+      );
+      if (r.changes) added++;
+
+      // Lock contact into 90-day cooldown
+      updatedCooldown[id] = {
+        plannedAt:     nowIso,
+        name:          contact.name,
+        cooldownDays:  90,
+        address:       contact.address,
+        mobile:        contact.mobile,
+        propensityScore: score,
+        source:        'topup',
+      };
+    }
+
+    fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(updatedCooldown, null, 2));
+    console.log(`[POST /api/plan/topup] Added ${added} contacts to today's plan.`);
+    res.json({ ok: true, added, requested: n });
+  } catch (e) {
+    console.error('[POST /api/plan/topup]', e.message);
     res.status(500).json({ error: e.message });
   }
 });

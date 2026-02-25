@@ -1219,6 +1219,35 @@ body::before {
 
 .btn-primary:hover { background: rgba(200,169,110,0.2); }
 
+/* ── Top Up Button ────────────────────────────────────────────────────────── */
+.topup-btn {
+  padding: 8px 20px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid var(--gold-border);
+  color: var(--gold-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.topup-btn:hover:not(:disabled) {
+  background: var(--gold-glow);
+  color: var(--gold);
+  border-color: var(--gold-border-hi);
+}
+
+.topup-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.topup-btn--sm {
+  padding: 8px 14px;
+}
+
 /* ── Mobile bottom nav ────────────────────────────────────────────────────── */
 .mobile-header {
   display: none;

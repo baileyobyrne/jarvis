@@ -152,13 +152,14 @@ function LoginPage({ onLogin }) {
 
 // ── Status Strip ───────────────────────────────────────────────────────────
 function StatusStrip({ status, planCount, calledCount }) {
+  const target    = status?.target || 30;
   const remaining = Math.max(0, planCount - calledCount);
   const pct = planCount > 0 ? Math.round((calledCount / planCount) * 100) : 0;
 
   return (
     <div className="status-strip">
       <div className="stat-chip">
-        <span className="stat-value">{planCount}<span style={{ fontSize: 13, opacity: 0.5 }}>/80</span></span>
+        <span className="stat-value">{planCount}<span style={{ fontSize: 13, opacity: 0.5 }}>/{target}</span></span>
         <span className="stat-label">Planned</span>
       </div>
       <div className="stat-divider" />
@@ -492,9 +493,22 @@ function CallsPage({ token }) {
   const [loading, setLoading] = useState(true);
   const [activeContactId, setActiveContactId] = useState(null);
   const [calledOpen, setCalledOpen] = useState(false);
+  const [topping, setTopping] = useState(false);
 
   // Keep ref in sync so handleLogged always reads current plan without stale closure
   useEffect(() => { planRef.current = plan; }, [plan]);
+
+  const handleTopUp = useCallback(async (n = 10) => {
+    setTopping(true);
+    try {
+      const res = await apiFetch(`/api/plan/topup?n=${n}`, token, { method: 'POST' });
+      if (res.ok) await loadData();
+    } catch (err) {
+      console.error('Top up failed', err);
+    } finally {
+      setTopping(false);
+    }
+  }, [token, loadData]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -597,11 +611,30 @@ function CallsPage({ token }) {
           </div>
         )}
 
+        {/* Top Up button — always visible, disabled while loading */}
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '4px 0 20px', gap: 8 }}>
+          <button
+            className="topup-btn"
+            onClick={() => handleTopUp(10)}
+            disabled={topping}
+          >
+            {topping ? 'Fetching…' : '+ Top Up 10 contacts'}
+          </button>
+          <button
+            className="topup-btn topup-btn--sm"
+            onClick={() => handleTopUp(5)}
+            disabled={topping}
+            title="Add 5 contacts"
+          >
+            +5
+          </button>
+        </div>
+
         {plan.length === 0 && (
           <div className="empty-state">
             <div className="empty-state-icon"><Calendar size={32} /></div>
             <div className="empty-state-title">No contacts planned today</div>
-            <div className="empty-state-sub">Run daily-planner.js to generate today's list</div>
+            <div className="empty-state-sub">Run daily-planner.js or tap Top Up above</div>
           </div>
         )}
       </div>
