@@ -1,15 +1,16 @@
 const fs = require('fs');
 const axios = require('axios');
-const { Client } = require('@notionhq/client');
 require('dotenv').config({ path: '/root/.openclaw/.env', override: true });
+
+const { db } = require('../lib/db.js');
+
+const DRY_RUN = process.argv.includes('--dry-run');
 
 const CONTACTS_FILE = '/root/.openclaw/workspace/willoughby-contacts.json';
 const RP_DATA_FILE = '/root/.openclaw/workspace/rp_data.csv';
 const COOLDOWN_FILE = '/root/.openclaw/workspace/recently-planned.json';
 const COOLDOWN_DAYS = 90;         // days before a daily-planned contact is eligible again
-const NOTION_COOLDOWN_DAYS = 180; // days before a Notion-contacted contact is eligible again
 const DAILY_TARGET = 80;          // maximum cards on the board at any one time
-const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
 function normalizeSuburb(suburb) {
@@ -30,7 +31,7 @@ function parseRPData(filePath) {
     const lines = content.split('\n');
     const headerLine = lines[2]; // Headers are on line 3 (index 2)
     if (!headerLine) return new Map();
-    
+
     const parseLine = (line) => {
         const values = [];
         let current = '';
@@ -85,90 +86,10 @@ function saveCooldown(cooldown) {
 function isOnCooldown(contactId, cooldown) {
     const entry = cooldown[contactId];
     if (!entry) return false;
-    // Respect per-entry cooldownDays (Notion-synced contacts use 180 days; local planned use 90)
+    // Respect per-entry cooldownDays (local planned contacts use 90 days)
     const days = entry.cooldownDays || COOLDOWN_DAYS;
     const daysSince = (Date.now() - new Date(entry.plannedAt).getTime()) / (1000 * 60 * 60 * 24);
     return daysSince < days;
-}
-
-// ─── NOTION HELPERS ───────────────────────────────────────────────────────────
-
-// Returns the total number of pages in the database matching a given Status value.
-async function countNotionStatus(notion, databaseId, status) {
-    let count = 0;
-    let cursor = undefined;
-    do {
-        const res = await notion.databases.query({
-            database_id: databaseId,
-            filter: { property: 'Status', status: { equals: status } },
-            start_cursor: cursor,
-            page_size: 100
-        });
-        count += res.results.length;
-        cursor = res.has_more ? res.next_cursor : undefined;
-    } while (cursor);
-    return count;
-}
-
-// Queries Notion for all cards with a "contacted" status, matches them against
-// the local AgentBox contacts by name, and writes them into the cooldown map
-// with a 180-day lockout so they are excluded from future scoring runs.
-async function syncNotionCooldowns(notion, databaseId, contacts, cooldown) {
-    const CONTACTED_STATUSES = [
-        '🗣️ Connected',
-        '⏳ Left Message',
-        '🤝 Appraisal Booked',
-        '🚫 Not Interested'
-    ];
-
-    // Build a lowercase-name → contact lookup for fast matching
-    const nameMap = new Map();
-    for (const c of contacts) {
-        if (c.name) nameMap.set(c.name.toLowerCase().trim(), c);
-    }
-
-    let synced = 0;
-    let unmatched = 0;
-
-    for (const status of CONTACTED_STATUSES) {
-        let cursor = undefined;
-        do {
-            const res = await notion.databases.query({
-                database_id: databaseId,
-                filter: { property: 'Status', status: { equals: status } },
-                start_cursor: cursor,
-                page_size: 100
-            });
-
-            for (const page of res.results) {
-                // Extract the contact name from the page title property
-                const titleProp = Object.values(page.properties).find(p => p.type === 'title');
-                const name = titleProp?.title?.[0]?.plain_text?.trim();
-                if (!name) continue;
-
-                const contact = nameMap.get(name.toLowerCase().trim());
-                if (contact) {
-                    const id = contact.id || contact.mobile;
-                    // Don't overwrite an existing entry with a shorter cooldown
-                    if (!cooldown[id] || (cooldown[id].cooldownDays || COOLDOWN_DAYS) < NOTION_COOLDOWN_DAYS) {
-                        cooldown[id] = {
-                            plannedAt: new Date().toISOString(),
-                            name: contact.name,
-                            cooldownDays: NOTION_COOLDOWN_DAYS,
-                            source: `notion:${status}`
-                        };
-                        synced++;
-                    }
-                } else {
-                    unmatched++;
-                }
-            }
-
-            cursor = res.has_more ? res.next_cursor : undefined;
-        } while (cursor);
-    }
-
-    console.log(`Notion sync: ${synced} contacts locked out for ${NOTION_COOLDOWN_DAYS} days, ${unmatched} names unmatched in AgentBox.`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -236,7 +157,7 @@ Data available:
 - Past Appraisals: ${context.appraisals}
 - Notes: ${context.notes}
 
-You must format the output identically for every single contact. Do NOT use Markdown asterisks (**). Use clean bullet points and standard emojis so it renders beautifully in a Notion database text field.
+You must format the output identically for every single contact. Do NOT use Markdown asterisks (**). Use clean bullet points and standard emojis so it renders cleanly in a structured text field.
 
 Cover these 4 areas in order, each as exactly one tight bullet point (add a 5th only if there is a genuinely strong additional angle):
 
@@ -267,40 +188,182 @@ Keep every bullet to one punchy line. No paragraphs. No fluff. No extra commenta
     }
 }
 
+// ─── SQLITE WRITE ─────────────────────────────────────────────────────────────
+// Runs after saveCooldown on every normal execution (and standalone in --dry-run).
+// If SQLite fails the error is logged but the script does NOT crash —
+// recently-planned.json remains the authoritative fallback throughout migration.
+function writeToDB(finalPayload) {
+    // en-CA locale gives YYYY-MM-DD, respecting Sydney timezone for plan_date
+    const planDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+    const now      = new Date().toISOString();
+
+    const upsertContact = db.prepare(`
+        INSERT INTO contacts
+            (id, name, mobile, address, suburb, tenure_years, propensity_score,
+             notes_raw, beds, baths, cars, property_type, occupancy, updated_at)
+        VALUES
+            (@id, @name, @mobile, @address, @suburb, @tenure_years, @propensity_score,
+             @notes_raw, @beds, @baths, @cars, @property_type, @occupancy, @updated_at)
+        ON CONFLICT(id) DO UPDATE SET
+            name             = excluded.name,
+            mobile           = excluded.mobile,
+            address          = excluded.address,
+            suburb           = excluded.suburb,
+            tenure_years     = excluded.tenure_years,
+            propensity_score = excluded.propensity_score,
+            notes_raw        = excluded.notes_raw,
+            beds             = excluded.beds,
+            baths            = excluded.baths,
+            cars             = excluded.cars,
+            property_type    = excluded.property_type,
+            occupancy        = excluded.occupancy,
+            updated_at       = excluded.updated_at
+    `);
+
+    const upsertPlan = db.prepare(`
+        INSERT INTO daily_plans
+            (plan_date, contact_id, propensity_score, intel, angle, tenure,
+             property_type, occupancy, source, created_at)
+        VALUES
+            (@plan_date, @contact_id, @propensity_score, @intel, @angle, @tenure,
+             @property_type, @occupancy, 'daily_planner', @created_at)
+        ON CONFLICT(plan_date, contact_id) DO UPDATE SET
+            propensity_score = excluded.propensity_score,
+            intel            = excluded.intel,
+            angle            = excluded.angle,
+            tenure           = excluded.tenure,
+            property_type    = excluded.property_type,
+            occupancy        = excluded.occupancy
+    `);
+
+    const runWrites = db.transaction(() => {
+        for (const contact of finalPayload) {
+            const tenureInt = parseInt(contact.tenure);
+            upsertContact.run({
+                id:               contact.id,
+                name:             contact.name,
+                mobile:           contact.mobile       || null,
+                address:          contact.address      || null,
+                suburb:           contact.suburb       || null,
+                tenure_years:     Number.isFinite(tenureInt) ? tenureInt : null,
+                propensity_score: contact.score,
+                notes_raw:        contact.intel        || null,
+                beds:             contact.beds         || null,
+                baths:            contact.baths        || null,
+                cars:             contact.cars         || null,
+                property_type:    contact.propertyType || null,
+                occupancy:        contact.occupancy    || null,
+                updated_at:       now
+            });
+
+            upsertPlan.run({
+                plan_date:        planDate,
+                contact_id:       contact.id,
+                propensity_score: contact.score,
+                intel:            contact.intel        || null,
+                angle:            contact.angle        || null,
+                tenure:           contact.tenure       || null,
+                property_type:    contact.propertyType || null,
+                occupancy:        contact.occupancy    || null,
+                created_at:       now
+            });
+        }
+    });
+
+    try {
+        runWrites();
+        console.log(`[db] SQLite: ${finalPayload.length} contacts upserted → contacts + daily_plans.`);
+    } catch (err) {
+        console.error('[db] SQLite write failed (non-fatal):', err.message);
+    }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function main() {
+    // ─── DRY RUN MODE ─────────────────────────────────────────────────────────
+    // Skips real contact loading and Anthropic calls. Writes 3 mock contacts to
+    // SQLite then reads them back so the full write path can be verified safely.
+    if (DRY_RUN) {
+        console.log('[dry-run] Skipping real data load — verifying SQLite writes with 3 mock contacts.');
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+        const mockPayload = [
+            {
+                id: 'DRY001', name: 'Test Contact Alpha', mobile: '0400000001',
+                address: '1 Jarvis St, WILLOUGHBY', suburb: 'WILLOUGHBY',
+                score: 50, tenure: '12 years',
+                intel: '📌 DATA TRIGGER: Owned 12 years — statistically overdue.\n📈 VALUE ADD: Recent comp strong.\n📋 CRM HOOK: No prior notes.',
+                angle: '🎯 STRATEGIC ASK: Float a no-pressure appraisal.',
+                beds: '4', baths: '2', cars: '2', propertyType: 'House', occupancy: 'Owner Occupied'
+            },
+            {
+                id: 'DRY002', name: 'Test Contact Beta', mobile: '0400000002',
+                address: '2 Test Rd, ARTARMON', suburb: 'ARTARMON',
+                score: 35, tenure: '8 years',
+                intel: '📌 DATA TRIGGER: Investor — not emotionally attached.\n📈 VALUE ADD: Rental yields shifting.',
+                angle: '🎯 STRATEGIC ASK: Explore selling vs. holding.',
+                beds: '3', baths: '1', cars: '1', propertyType: 'Apartment', occupancy: 'Rented'
+            },
+            {
+                id: 'DRY003', name: 'Test Contact Gamma', mobile: '0400000003',
+                address: '3 Mock Ln, NAREMBURN', suburb: 'NAREMBURN',
+                score: 20, tenure: 'Unknown',
+                intel: '📌 DATA TRIGGER: Tenure unknown — appraisal history trigger.',
+                angle: '🎯 STRATEGIC ASK: Offer free market update.',
+                beds: '', baths: '', cars: '', propertyType: '', occupancy: ''
+            }
+        ];
+        writeToDB(mockPayload);
+        // Read back to confirm the rows landed correctly
+        const planRows = db.prepare(
+            `SELECT contact_id, propensity_score, tenure FROM daily_plans WHERE plan_date = ?`
+        ).all(today);
+        console.log(`[dry-run] daily_plans rows for ${today}:`, planRows);
+        const contactRows = db.prepare(
+            `SELECT id, name, tenure_years, suburb FROM contacts WHERE id IN ('DRY001','DRY002','DRY003')`
+        ).all();
+        console.log('[dry-run] contacts rows:', contactRows);
+        console.log('[dry-run] Complete — recently-planned.json untouched, no Anthropic calls made.');
+        return;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     console.log('Loading contacts and RP data...');
     const contactsData = JSON.parse(fs.readFileSync(CONTACTS_FILE, 'utf8'));
     const truthLookup = parseRPData(RP_DATA_FILE);
     const contacts = contactsData.contacts;
 
-    // ─── NOTION PRE-FLIGHT ────────────────────────────────────────────────────
-    const notion = new Client({ auth: process.env.NOTION_API_KEY });
-    const databaseId = process.env.NOTION_DATABASE_ID;
-
-    console.log('Checking Notion board...');
-    const currentCount = await countNotionStatus(notion, databaseId, '🎯 To Call Today');
-    console.log(`Current "🎯 To Call Today" count: ${currentCount} / ${DAILY_TARGET}`);
-
-    const targetCalls = DAILY_TARGET - currentCount;
+    // ─── BOARD STATE CHECK ───────────────────────────────────────────────────
+    const cooldown = loadCooldown();
+    const today = new Date().toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' });
+    const todayCount = Object.values(cooldown).filter(e =>
+        e.plannedAt && new Date(e.plannedAt).toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' }) === today
+    ).length;
+    const targetCalls = DAILY_TARGET - todayCount;
     if (targetCalls <= 0) {
-        console.log('Board is full. No new contacts needed.');
+        console.log(`Board is full — ${todayCount} contacts already planned today. Nothing to do.`);
         return;
     }
-    console.log(`Slots available: ${targetCalls} new contacts to generate.`);
-
-    // Sync Notion "contacted" statuses → local cooldown (180-day lockout)
-    const cooldown = loadCooldown();
-    console.log('Syncing Notion contacted statuses into cooldown...');
-    await syncNotionCooldowns(notion, databaseId, contacts, cooldown);
-    saveCooldown(cooldown); // persist Notion sync before scoring
+    console.log(`Today's board: ${todayCount} already planned. Slots available: ${targetCalls}.`);
     // ─────────────────────────────────────────────────────────────────────────
 
-    // Filter out contacts on cooldown (local 90-day + Notion 180-day)
-    const eligibleContacts = contacts.filter(c => {
+    // Filter to McGrath Willoughby territory
+    const AREA_SUBURBS = new Set([
+        'WILLOUGHBY', 'NORTH WILLOUGHBY', 'WILLOUGHBY EAST',
+        'NAREMBURN', 'ARTARMON', 'CHATSWOOD', 'CASTLE COVE',
+        'MIDDLE COVE', 'NORTHBRIDGE', 'LANE COVE', 'ST LEONARDS', 'CROWS NEST'
+    ]);
+    const areaContacts = contacts.filter(c => {
+        const suburb = (c.suburb || '').trim().toUpperCase();
+        return AREA_SUBURBS.has(suburb);
+    });
+    console.log(`Area filter: ${contacts.length - areaContacts.length} contacts outside territory excluded. ${areaContacts.length} in area.`);
+
+    // Filter out contacts on cooldown (local 90-day)
+    const eligibleContacts = areaContacts.filter(c => {
         const id = c.id || c.mobile;
         return !isOnCooldown(id, cooldown);
     });
-    console.log(`Cooldown filter: ${contacts.length - eligibleContacts.length} contacts excluded. ${eligibleContacts.length} eligible.`);
+    console.log(`Cooldown filter: ${areaContacts.length - eligibleContacts.length} contacts excluded. ${eligibleContacts.length} eligible.`);
 
     console.log('Scoring contacts...');
     const scoredContacts = eligibleContacts.map(contact => {
@@ -326,68 +389,62 @@ async function main() {
         const talkingPoint = await generateTalkingPoint(contact, contact.truthEntry);
         const saleYearMatch = contact.truthEntry?.['Sale Date']?.match(/\d{4}/);
         const tenure = saleYearMatch ? `${new Date().getFullYear() - parseInt(saleYearMatch[0])} years` : 'Unknown';
+
+        // Split AI brief into intel (data bullets) and angle (🎯 STRATEGIC ASK)
+        const talkingLines = talkingPoint.split('\n').filter(l => l.trim());
+        const angleLine = talkingLines.find(l => l.includes('🎯')) || '';
+        const intelLines = talkingLines.filter(l => !l.includes('🎯')).join('\n');
+
         finalPayload.push({
-            name: contact.name,
-            mobile: contact.mobile,
-            address: `${contact.address || contact.truthEntry?.['Street Address']}, ${contact.suburb || contact.truthEntry?.['Suburb'] || ''}`.trim().replace(/,\s*$/, ''),
-            score: contact.score,
+            id:           contact.id || contact.mobile,
+            name:         contact.name,
+            mobile:       contact.mobile,
+            suburb:       contact.suburb || contact.truthEntry?.['Suburb'] || '',
+            address:      `${contact.address || contact.truthEntry?.['Street Address']}, ${contact.suburb || contact.truthEntry?.['Suburb'] || ''}`.trim().replace(/,\s*$/, ''),
+            score:        contact.score,
             strategicTalkingPoint: talkingPoint,
-            source: 'Daily Planner',
-            tenure
+            source:       'Daily Planner',
+            tenure,
+            intel:        intelLines,
+            angle:        angleLine,
+            beds:         contact.truthEntry?.['Bed']           || '',
+            baths:        contact.truthEntry?.['Bath']          || '',
+            cars:         contact.truthEntry?.['Car']           || '',
+            propertyType: contact.truthEntry?.['Property Type'] || '',
+            occupancy:    contact.truthEntry?.['Owner Type']    || ''
         });
         process.stdout.write('.');
     }
     console.log('\nTalking points generated.');
 
-    console.log('Writing contacts to Notion...');
-    let notionSuccess = 0;
-    let notionFailed = 0;
-    for (const contact of finalPayload) {
-        try {
-            await notion.pages.create({
-                parent: { database_id: databaseId },
-                properties: {
-                    'Contact Name': { title: [{ text: { content: contact.name || '' } }] },
-                    'Property Address': { rich_text: [{ text: { content: contact.address || '' } }] },
-                    'Mobile': { phone_number: contact.mobile || null },
-                    'Propensity Score': { number: contact.score },
-                    'AI Strategy': { rich_text: [{ text: { content: contact.strategicTalkingPoint || '' } }] },
-                    'Status': { status: { name: '🎯 To Call Today' } }
-                },
-                children: [
-                    {
-                        object: 'block',
-                        type: 'paragraph',
-                        paragraph: {
-                            rich_text: [
-                                {
-                                    type: 'text',
-                                    text: {
-                                        content: contact.strategicTalkingPoint || ''
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            });
-            notionSuccess++;
-            process.stdout.write('.');
-        } catch (err) {
-            console.error(`\n  → Notion error for ${contact.name}: ${err.message}`);
-            notionFailed++;
-        }
-    }
-    console.log(`\nNotion write complete: ${notionSuccess} created, ${notionFailed} failed.`);
-
-    // Lock sent contacts out for 90 days so they never repeat in the daily pool
+    // Lock sent contacts out for 90 days and write full enriched objects
     const now = new Date().toISOString();
-    for (const contact of topContacts) {
+    for (const contact of finalPayload) {
         const id = contact.id || contact.mobile;
-        cooldown[id] = { plannedAt: now, name: contact.name, cooldownDays: COOLDOWN_DAYS };
+        cooldown[id] = {
+            plannedAt:       now,
+            name:            contact.name,
+            cooldownDays:    COOLDOWN_DAYS,
+            address:         contact.address,
+            mobile:          contact.mobile,
+            tenure:          contact.tenure,
+            propensityScore: contact.score,
+            intel:           contact.intel,
+            angle:           contact.angle,
+            beds:            contact.beds,
+            baths:           contact.baths,
+            cars:            contact.cars,
+            propertyType:    contact.propertyType,
+            occupancy:       contact.occupancy,
+            source:          contact.source
+        };
     }
     saveCooldown(cooldown);
-    console.log(`Cooldown tracker updated: ${topContacts.length} contacts locked out for ${COOLDOWN_DAYS} days.`);
+    console.log(`Cooldown tracker updated: ${finalPayload.length} contacts locked out for ${COOLDOWN_DAYS} days.`);
+
+    // ─── SQLITE (parallel write — JSON above is the fallback during migration) ─
+    writeToDB(finalPayload);
+    // ─────────────────────────────────────────────────────────────────────────
 }
 
 main();
