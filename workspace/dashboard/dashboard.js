@@ -498,18 +498,6 @@ function CallsPage({ token }) {
   // Keep ref in sync so handleLogged always reads current plan without stale closure
   useEffect(() => { planRef.current = plan; }, [plan]);
 
-  const handleTopUp = useCallback(async (n = 10) => {
-    setTopping(true);
-    try {
-      const res = await apiFetch(`/api/plan/topup?n=${n}`, token, { method: 'POST' });
-      if (res.ok) await loadData();
-    } catch (err) {
-      console.error('Top up failed', err);
-    } finally {
-      setTopping(false);
-    }
-  }, [token, loadData]);
-
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
@@ -535,6 +523,18 @@ function CallsPage({ token }) {
       setLoading(false);
     }
   }, [token]);
+
+  const handleTopUp = useCallback(async (n = 10) => {
+    setTopping(true);
+    try {
+      const res = await apiFetch(`/api/plan/topup?n=${n}`, token, { method: 'POST' });
+      if (res.ok) await loadData();
+    } catch (err) {
+      console.error('Top up failed', err);
+    } finally {
+      setTopping(false);
+    }
+  }, [token, loadData]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
