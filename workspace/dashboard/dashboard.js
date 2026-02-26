@@ -10,8 +10,11 @@ const {
   MapPin, Calendar, Check, X, AlertCircle, Home, Activity,
   MessageSquare, PhoneCall, PhoneOff, PhoneMissed, Star, RefreshCw,
   History, Menu, Building2, CheckCircle, Bed, Bath, Car, Plus, Mail,
-  Search, Pencil, Trash2
+  Search, Pencil, Trash2, Copy, SortAsc
 } = LucideReact;
+
+// SMS link helper — opens iMessages on macOS
+function smsHref(phone) { return 'sms:' + (phone || '').replace(/\s/g, ''); }
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const OUTCOME_LABELS = {
@@ -563,9 +566,14 @@ function ProspectCard({ contact, onLogged, token }) {
             <span className="prospect-dist">{contact.distance}m</span>
           )}
           {contact.mobile && (
-            <a className="prospect-tel" href={`tel:${contact.mobile}`}>
-              <Phone size={11} />{contact.mobile}
-            </a>
+            <>
+              <a className="prospect-tel" href={`tel:${contact.mobile}`}>
+                <Phone size={11} />{contact.mobile}
+              </a>
+              <a className="prospect-sms" href={smsHref(contact.mobile)} title="Send iMessage/SMS">
+                <MessageSquare size={11} />
+              </a>
+            </>
           )}
         </div>
       </div>
@@ -1531,14 +1539,21 @@ function HistoryPage({ token }) {
 
 // ── Search Card ────────────────────────────────────────────────────────────
 function SearchCard({ prop, token, onAddedToPlan }) {
-  const [addState, setAddState] = useState(null); // null | 'adding' | 'added' | 'already'
-  const [showOutcome, setShowOutcome] = useState(false);
-  const [logging, setLogging] = useState(false);
-  const [loggedOutcome, setLoggedOutcome] = useState(null);
+  const [addState, setAddState]         = useState(null); // null | 'adding' | 'added' | 'already'
+  const [showOutcome, setShowOutcome]   = useState(false);
+  const [logging, setLogging]           = useState(false);
+  const [loggedOutcome, setLoggedOutcome] = useState(prop.last_outcome || null);
+  const [copied, setCopied]             = useState(false);
+  const [showReminder, setShowReminder] = useState(false);
+  const [reminderDays, setReminderDays] = useState(1);
+  const [reminderNote, setReminderNote] = useState('');
+  const [savingReminder, setSavingReminder] = useState(false);
+  const [showHistory, setShowHistory]   = useState(false);
+  const [history, setHistory]           = useState(null); // null = not yet loaded
 
-  const contactId = prop.crm_contact_id;
+  const contactId   = prop.crm_contact_id;
   const displayName = prop.crm_name || prop.owner_name || 'Unknown Owner';
-  const phone = prop.contact_mobile;
+  const phone       = prop.contact_mobile;
 
   const handleAddToPlan = useCallback(async () => {
     if (!contactId) return;
@@ -1570,6 +1585,50 @@ function SearchCard({ prop, token, onAddedToPlan }) {
     finally { setLogging(false); }
   }, [contactId, token]);
 
+  const copyPhone = useCallback(() => {
+    if (!phone) return;
+    navigator.clipboard.writeText(phone);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [phone]);
+
+  const saveReminder = useCallback(async () => {
+    if (!contactId) return;
+    setSavingReminder(true);
+    try {
+      const d = new Date();
+      d.setDate(d.getDate() + reminderDays);
+      d.setHours(9, 0, 0, 0);
+      await apiFetch('/api/reminders', token, {
+        method: 'POST',
+        body: JSON.stringify({
+          contact_id:     contactId,
+          contact_name:   prop.crm_name || prop.owner_name,
+          contact_mobile: phone,
+          note:           reminderNote || 'Follow up',
+          fire_at:        d.toISOString()
+        })
+      });
+      setShowReminder(false);
+      setReminderNote('');
+    } catch (err) { console.error('save reminder failed', err); }
+    finally { setSavingReminder(false); }
+  }, [contactId, token, reminderDays, reminderNote, phone, prop.crm_name, prop.owner_name]);
+
+  const loadHistory = useCallback(async () => {
+    if (!contactId || history !== null) return;
+    try {
+      const res = await apiFetch(`/api/contacts/${contactId}/history`, token);
+      if (res.ok) setHistory(await res.json());
+      else setHistory([]);
+    } catch { setHistory([]); }
+  }, [contactId, token, history]);
+
+  const toggleHistory = useCallback(() => {
+    setShowHistory(h => !h);
+    loadHistory();
+  }, [loadHistory]);
+
   const scoreColor = prop.propensity_score >= 45 ? 'var(--tier-high)' : prop.propensity_score >= 20 ? 'var(--tier-med)' : 'var(--text-muted)';
 
   return (
@@ -1591,7 +1650,7 @@ function SearchCard({ prop, token, onAddedToPlan }) {
         </div>
       </div>
 
-      {/* Owner line */}
+      {/* Owner + phone line */}
       <div className="search-card-owner-row">
         <span className="search-card-owner">{displayName}</span>
         {prop.do_not_call ? (
@@ -1608,12 +1667,38 @@ function SearchCard({ prop, token, onAddedToPlan }) {
         )}
       </div>
 
-      {/* Market line */}
-      {(prop.valuation_amount || prop.last_sale_price || prop.last_sale_date) && (
-        <div className="search-card-market-row">
-          {prop.valuation_amount && <span className="search-card-val">{prop.valuation_amount}</span>}
-          {prop.last_sale_price && <span className="search-card-sale">{prop.last_sale_price}</span>}
-          {prop.last_sale_date && <span className="search-card-saledate">{prop.last_sale_date.slice(0, 7)}</span>}
+      {/* Last interaction preview */}
+      {prop.last_called_at && (
+        <div className="search-card-last-row">
+          <span className="search-last-label">Last:</span>
+          <span className={`search-last-outcome chip-${prop.last_outcome}`}>{OUTCOME_LABELS[prop.last_outcome] || prop.last_outcome}</span>
+          <span className="search-last-date">{timeAgo(prop.last_called_at)}</span>
+          {prop.last_note && <span className="search-last-note">{prop.last_note}</span>}
+          {contactId && (
+            <button className="search-last-history" onClick={toggleHistory}>
+              {showHistory ? 'Hide' : 'History'}
+            </button>
+          )}
+        </div>
+      )}
+      {!prop.last_called_at && contactId && (
+        <div className="search-card-last-row search-card-last-row--never">
+          <span className="search-last-label">Never contacted</span>
+        </div>
+      )}
+
+      {/* Call history (expandable) */}
+      {showHistory && (
+        <div className="search-card-history">
+          {history === null && <span className="search-history-loading">Loading…</span>}
+          {history && history.length === 0 && <span className="search-history-empty">No call history</span>}
+          {history && history.map((h, i) => (
+            <div key={i} className="search-history-row">
+              <span className={`search-last-outcome chip-${h.outcome}`}>{OUTCOME_LABELS[h.outcome] || h.outcome}</span>
+              <span className="search-last-date">{fmtDate(h.called_at)}</span>
+              {h.notes && <span className="search-last-note">{h.notes}</span>}
+            </div>
+          ))}
         </div>
       )}
 
@@ -1623,6 +1708,16 @@ function SearchCard({ prop, token, onAddedToPlan }) {
           <a className="search-action-btn search-action--call" href={`tel:${phone}`}>
             <Phone size={10} /> Call
           </a>
+        )}
+        {phone && (
+          <a className="search-action-btn search-action--sms" href={smsHref(phone)} title="Open iMessage">
+            <MessageSquare size={10} /> SMS
+          </a>
+        )}
+        {phone && (
+          <button className="search-action-btn search-action--copy" onClick={copyPhone} title="Copy number">
+            <Copy size={10} /> {copied ? 'Copied!' : 'Copy'}
+          </button>
         )}
         {contactId && (
           <button
@@ -1640,13 +1735,19 @@ function SearchCard({ prop, token, onAddedToPlan }) {
               {OUTCOME_LABELS[loggedOutcome] || loggedOutcome}
             </span>
           ) : (
-            <button
-              className="search-action-btn search-action--outcome"
-              onClick={() => setShowOutcome(o => !o)}
-            >
+            <button className="search-action-btn search-action--outcome" onClick={() => setShowOutcome(o => !o)}>
               <PhoneCall size={10} /> Log Outcome
             </button>
           )
+        )}
+        {contactId && (
+          <button
+            className={`search-action-btn search-action--reminder${showReminder ? ' active' : ''}`}
+            onClick={() => setShowReminder(r => !r)}
+            title="Set reminder"
+          >
+            <Bell size={10} /> Reminder
+          </button>
         )}
       </div>
 
@@ -1666,6 +1767,35 @@ function SearchCard({ prop, token, onAddedToPlan }) {
           ))}
         </div>
       )}
+
+      {/* Inline reminder picker */}
+      {showReminder && (
+        <div className="followup-prompt" style={{ marginTop: 6 }}>
+          <div className="followup-label">Remind me in:</div>
+          <div className="followup-row">
+            {[[1,'Tomorrow'], [2,'2 Days'], [7,'1 Week']].map(([days, label]) => (
+              <button
+                key={days}
+                className={`followup-quick${reminderDays === days ? ' active' : ''}`}
+                onClick={() => setReminderDays(days)}
+              >{label}</button>
+            ))}
+          </div>
+          <input
+            className="followup-note-input"
+            type="text"
+            placeholder="Note (optional)..."
+            value={reminderNote}
+            onChange={e => setReminderNote(e.target.value)}
+          />
+          <div className="followup-actions">
+            <button className="followup-skip" onClick={() => setShowReminder(false)}>Cancel</button>
+            <button className="followup-save" onClick={saveReminder} disabled={savingReminder}>
+              {savingReminder ? 'Saving…' : 'Save Reminder'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1674,7 +1804,7 @@ function SearchCard({ prop, token, onAddedToPlan }) {
 function SearchPage({ token }) {
   const [form, setForm] = useState({
     street: '', suburb: 'all', type: 'all',
-    beds_min: '', beds_max: '', owner: '', show_dnc: false
+    beds_min: '', beds_max: '', owner: '', show_dnc: false, sort_by: 'score'
   });
   const [results, setResults] = useState([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -1695,6 +1825,7 @@ function SearchPage({ token }) {
     if (form.beds_max) params.set('beds_max', form.beds_max);
     if (form.owner)    params.set('owner',    form.owner);
     if (form.show_dnc) params.set('show_dnc', '1');
+    if (form.sort_by && form.sort_by !== 'score') params.set('sort_by', form.sort_by);
     params.set('page', p);
     try {
       const res = await apiFetch(`/api/search?${params}`, token);
@@ -1777,6 +1908,14 @@ function SearchPage({ token }) {
               onChange={e => set('owner', e.target.value)}
               onKeyDown={handleKeyDown}
             />
+          </div>
+          <div className="search-field">
+            <label className="search-field-label">Sort By</label>
+            <select className="search-input" value={form.sort_by} onChange={e => set('sort_by', e.target.value)}>
+              <option value="score">Propensity Score</option>
+              <option value="address_asc">Address (Low → High)</option>
+              <option value="last_contacted">Recently Contacted</option>
+            </select>
           </div>
           <div className="search-field search-field--check">
             <label className="search-check-label">

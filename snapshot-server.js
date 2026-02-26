@@ -1444,10 +1444,29 @@ app.post('/api/prospecting/ingest', requireAuth, (req, res) => {
   }
 });
 
+// Normalise full street type words to abbreviations used in the properties table
+// e.g. "second avenue" → "second ave", "penshurst street" → "penshurst st"
+function abbrevStreetType(s) {
+  if (!s) return s;
+  return s
+    .replace(/\bavenue\b/gi, 'ave')
+    .replace(/\bstreet\b/gi, 'st')
+    .replace(/\broad\b/gi, 'rd')
+    .replace(/\bdrive\b/gi, 'dr')
+    .replace(/\bplace\b/gi, 'pl')
+    .replace(/\bclose\b/gi, 'cl')
+    .replace(/\bcrescent\b/gi, 'cres')
+    .replace(/\bcourt\b/gi, 'ct')
+    .replace(/\bparade\b/gi, 'pde')
+    .replace(/\bterrace\b/gi, 'tce')
+    .replace(/\bgrove\b/gi, 'gr')
+    .replace(/\bboulevard\b/gi, 'blvd');
+}
+
 // GET /api/search — query properties + contacts with prospecting filters
 app.get('/api/search', requireAuth, (req, res) => {
   try {
-    const { street, suburb, type, beds_min, beds_max, owner, show_dnc, page } = req.query;
+    const { street, suburb, type, beds_min, beds_max, owner, show_dnc, page, sort_by } = req.query;
     const pageNum  = Math.max(1, parseInt(page) || 1);
     const pageSize = 50;
     const offset   = (pageNum - 1) * pageSize;
@@ -1457,10 +1476,16 @@ app.get('/api/search', requireAuth, (req, res) => {
     const params     = [];
 
     if (street) {
+      // Normalize full street type names to match the abbreviated format in the properties table
+      const normalizedStreet = abbrevStreetType(street.toLowerCase());
       conditions.push("(LOWER(p.street_name) LIKE ? OR LOWER(p.address) LIKE ?)");
-      params.push(`%${street.toLowerCase()}%`, `%${street.toLowerCase()}%`);
+      params.push(`%${normalizedStreet}%`, `%${normalizedStreet}%`);
     }
     if (suburb && suburb !== 'all') {
+      // Willoughby / Willoughby East / North Willoughby are all the same farm area.
+      // AgentBox often records contacts under "Willoughby" regardless of exact sub-suburb.
+      // We search the properties table (which has accurate Pricefinder suburb data) so
+      // filtering by specific sub-suburb here works correctly.
       conditions.push("LOWER(p.suburb) LIKE ?");
       params.push(`%${suburb.toLowerCase()}%`);
     }
@@ -1486,10 +1511,27 @@ app.get('/api/search', requireAuth, (req, res) => {
 
     const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
 
+    // ORDER BY depends on sort_by param
+    let orderBy;
+    if (sort_by === 'address_asc') {
+      orderBy = 'ORDER BY p.street_name ASC, CAST(p.street_number AS INTEGER) ASC, p.street_number ASC';
+    } else if (sort_by === 'last_contacted') {
+      orderBy = 'ORDER BY lc.last_called_at DESC NULLS LAST, COALESCE(c.propensity_score, 0) DESC';
+    } else {
+      // default: propensity score descending, then address
+      orderBy = 'ORDER BY CASE WHEN c.propensity_score > 0 THEN 0 ELSE 1 END, COALESCE(c.propensity_score, 0) DESC, p.suburb, p.street_name, CAST(p.street_number AS INTEGER) ASC';
+    }
+
     const countRow = db.prepare(`
       SELECT COUNT(*) AS n
       FROM properties p
       LEFT JOIN contacts c ON p.contact_id = c.id
+      LEFT JOIN (
+        SELECT cl.contact_id, cl.called_at AS last_called_at, cl.outcome AS last_outcome, cl.notes AS last_note
+        FROM call_log cl
+        INNER JOIN (SELECT contact_id, MAX(called_at) AS max_at FROM call_log GROUP BY contact_id) latest
+          ON cl.contact_id = latest.contact_id AND cl.called_at = latest.max_at
+      ) lc ON c.id = lc.contact_id
       ${where}
     `).get(...params);
 
@@ -1498,8 +1540,8 @@ app.get('/api/search', requireAuth, (req, res) => {
         p.id AS property_id,
         p.address, p.street_number, p.street_name, p.suburb,
         p.beds, p.baths, p.cars, p.property_type,
-        p.owner_name, p.valuation_amount, p.last_sale_date, p.last_sale_price,
-        p.pf_phone, p.do_not_call, p.government_number,
+        p.owner_name, p.government_number,
+        p.pf_phone, p.do_not_call,
         p.contact_id,
         c.id AS crm_contact_id,
         c.name AS crm_name,
@@ -1508,14 +1550,20 @@ app.get('/api/search', requireAuth, (req, res) => {
         c.tenure_years,
         c.occupancy,
         c.contact_class,
-        COALESCE(c.mobile, p.pf_phone) AS contact_mobile
+        COALESCE(c.mobile, p.pf_phone) AS contact_mobile,
+        lc.last_called_at,
+        lc.last_outcome,
+        lc.last_note
       FROM properties p
       LEFT JOIN contacts c ON p.contact_id = c.id
+      LEFT JOIN (
+        SELECT cl.contact_id, cl.called_at AS last_called_at, cl.outcome AS last_outcome, cl.notes AS last_note
+        FROM call_log cl
+        INNER JOIN (SELECT contact_id, MAX(called_at) AS max_at FROM call_log GROUP BY contact_id) latest
+          ON cl.contact_id = latest.contact_id AND cl.called_at = latest.max_at
+      ) lc ON c.id = lc.contact_id
       ${where}
-      ORDER BY
-        CASE WHEN c.propensity_score > 0 THEN 0 ELSE 1 END,
-        COALESCE(c.propensity_score, 0) DESC,
-        p.suburb, p.street_name, p.street_number
+      ${orderBy}
       LIMIT ${pageSize} OFFSET ${offset}
     `).all(...params);
 
@@ -1528,6 +1576,23 @@ app.get('/api/search', requireAuth, (req, res) => {
     });
   } catch (e) {
     console.error('[GET /api/search]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/contacts/:id/history — full call log for a contact (for history view)
+app.get('/api/contacts/:id/history', requireAuth, (req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT called_at, outcome, notes
+      FROM call_log
+      WHERE contact_id = ?
+      ORDER BY called_at DESC
+      LIMIT 30
+    `).all(req.params.id);
+    res.json(rows);
+  } catch (e) {
+    console.error('[GET /api/contacts/:id/history]', e.message);
     res.status(500).json({ error: e.message });
   }
 });

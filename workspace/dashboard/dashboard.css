@@ -2367,3 +2367,120 @@ body::before {
   padding-top: 6px;
   border-top: 1px solid rgba(255,255,255,0.05);
 }
+
+/* ── ProspectCard SMS icon ─────────────────────────────────────────────────── */
+.prospect-sms {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  text-decoration: none;
+  padding: 2px 4px;
+  border-radius: 3px;
+  transition: color 0.15s;
+}
+.prospect-sms:hover { color: #3b82f6; }
+
+/* ── SearchCard — SMS / Copy / Reminder buttons ────────────────────────────── */
+.search-action--sms {
+  background: rgba(59,130,246,0.08);
+  border-color: rgba(59,130,246,0.25);
+  color: #3b82f6;
+}
+.search-action--sms:hover { background: rgba(59,130,246,0.18); }
+
+.search-action--copy {
+  background: rgba(255,255,255,0.04);
+  border-color: rgba(255,255,255,0.1);
+  color: var(--text-secondary);
+}
+.search-action--copy:hover { border-color: rgba(255,255,255,0.25); color: var(--text-primary); }
+
+.search-action--reminder {
+  background: rgba(200,169,110,0.06);
+  border-color: rgba(200,169,110,0.2);
+  color: var(--gold-dim);
+}
+.search-action--reminder:hover, .search-action--reminder.active {
+  background: rgba(200,169,110,0.14);
+  border-color: rgba(200,169,110,0.4);
+  color: var(--gold);
+}
+
+/* ── SearchCard — last interaction row ─────────────────────────────────────── */
+.search-card-last-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 10px;
+  flex-wrap: wrap;
+}
+.search-card-last-row--never .search-last-label {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.search-last-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.search-last-outcome {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+}
+.search-last-date {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+}
+.search-last-note {
+  font-size: 10px;
+  color: var(--text-secondary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+.search-last-history {
+  background: none;
+  border: none;
+  color: var(--gold-dim);
+  font-size: 9px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  padding: 2px 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  transition: color 0.15s;
+}
+.search-last-history:hover { color: var(--gold); }
+
+/* ── SearchCard — expandable history ───────────────────────────────────────── */
+.search-card-history {
+  background: rgba(0,0,0,0.2);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.search-history-loading,
+.search-history-empty {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+.search-history-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
