@@ -504,7 +504,7 @@ function TierSection({ tier, contacts, token, onLogged, activeContactId, default
 
 // ── Prospect Card (Just Sold / Just Listed contacts) ───────────────────────
 function ProspectCard({ contact, onLogged, token }) {
-  const [localOutcome, setLocalOutcome] = useState(null);
+  const [localOutcome, setLocalOutcome] = useState(contact.outcome || null);
   const [logging, setLogging] = useState(false);
   const [showFollowUp, setShowFollowUp] = useState(false);
   const [followUpDays, setFollowUpDays] = useState(1);

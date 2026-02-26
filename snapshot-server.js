@@ -324,11 +324,49 @@ app.post('/api/contacts/:id/called', requireAuth, (req, res) => {
 });
 
 // GET /api/alerts — public (no auth), returns latest listing/sale alerts newest-first
+// Enriches each topContact with their most recent call_log outcome so the UI
+// can correctly show "already called" state after a page reload.
 app.get('/api/alerts', (req, res) => {
   try {
     if (!fs.existsSync(ALERTS_FILE)) return res.json([]);
     const alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
-    res.json([...alerts].reverse());
+
+    // Collect all unique contact IDs across all alert topContacts
+    const contactIds = [];
+    const seen = new Set();
+    for (const alert of alerts) {
+      for (const c of (alert.topContacts || [])) {
+        if (c.id && !seen.has(String(c.id))) {
+          contactIds.push(String(c.id));
+          seen.add(String(c.id));
+        }
+      }
+    }
+
+    // Build outcome map: most recent call_log entry per contact
+    const outcomeMap = {};
+    if (contactIds.length > 0) {
+      const placeholders = contactIds.map(() => '?').join(',');
+      const rows = db.prepare(
+        `SELECT contact_id, outcome, called_at FROM call_log
+         WHERE contact_id IN (${placeholders})
+         ORDER BY called_at DESC`
+      ).all(...contactIds);
+      for (const row of rows) {
+        if (!outcomeMap[row.contact_id]) outcomeMap[row.contact_id] = row.outcome;
+      }
+    }
+
+    // Inject outcome into each topContact (null if never called)
+    const enriched = alerts.map(alert => ({
+      ...alert,
+      topContacts: (alert.topContacts || []).map(c => ({
+        ...c,
+        outcome: c.id ? (outcomeMap[String(c.id)] || null) : null
+      }))
+    }));
+
+    res.json([...enriched].reverse());
   } catch (e) {
     console.error('[GET /api/alerts]', e.message);
     res.json([]);
