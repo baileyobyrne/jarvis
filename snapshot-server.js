@@ -37,13 +37,27 @@ const GEO_CACHE_FILE = '/root/.openclaw/workspace/geo-cache.json';
 const DASHBOARD_DIR  = '/root/.openclaw/workspace/dashboard';
 
 // ─── In-memory cache (refreshed every hour) ───────────────────────────────────
-let _contactsMap    = null;   // Map<id, contactObject>           — AgentBox JSON (67k)
-let _rpMap          = null;   // Map<"STREET SUBURB", rpEntry>    — RP Data CSV
-let _geoCache       = null;   // Map<address_string, {lat,lon}>   — geo-cache.json
-let _sqlContactsMap = null;   // Map<id, contact>                 — SQLite contacts + pf_phone
-let _recentCallMap  = null;   // Map<contact_id, [{outcome, called_at}]> — last 90 days
-let _cacheTs        = 0;
-const CACHE_TTL     = 60 * 60 * 1000; // 1 hour
+let _contactsMap     = null;   // Map<id, contactObject>           — AgentBox JSON (67k)
+let _rpMap           = null;   // Map<"STREET SUBURB", rpEntry>    — RP Data CSV
+let _geoCache        = null;   // Map<address_string, {lat,lon}>   — geo-cache.json
+let _sqlContactsMap  = null;   // Map<id, contact>                 — SQLite contacts + pf_phone
+let _recentCallMap   = null;   // Map<contact_id, [{outcome, called_at}]> — last 90 days
+let _agentboxAddrSet = null;   // Set<normalizedAddr>              — addresses with AgentBox coverage
+let _cacheTs         = 0;
+const CACHE_TTL      = 60 * 60 * 1000; // 1 hour
+
+// Normalise an address string to a canonical form for dedup (strips suburb, abbreviates street types)
+function normalizeAddrForDedup(addr) {
+  return (addr || '').toUpperCase()
+    .split(',')[0]  // strip suburb component
+    .replace(/\bAVENUE\b/g, 'AVE').replace(/\bSTREET\b/g, 'ST')
+    .replace(/\bROAD\b/g, 'RD').replace(/\bDRIVE\b/g, 'DR')
+    .replace(/\bLANE\b/g, 'LN').replace(/\bPLACE\b/g, 'PL')
+    .replace(/\bCLOSE\b/g, 'CL').replace(/\bCRESCENT\b/g, 'CRES')
+    .replace(/\bCOURT\b/g, 'CT').replace(/\bPARADE\b/g, 'PDE')
+    .replace(/\bTERRACE\b/g, 'TCE').replace(/\bGROVE\b/g, 'GR')
+    .replace(/\s+/g, ' ').trim();
+}
 
 function normalizeSuburb(suburb) {
   if (!suburb) return '';
@@ -98,6 +112,14 @@ function loadCache(force = false) {
   _rpMap   = parseRPData();
   _cacheTs = Date.now();
 
+  // ── AgentBox address set (for suppressing pf_ duplicates) ──────────────────
+  // Any address covered by AgentBox takes priority over a pf_ contact at the same address.
+  _agentboxAddrSet = new Set();
+  for (const [, c] of _contactsMap) {
+    const norm = normalizeAddrForDedup(c.address || '');
+    if (norm) _agentboxAddrSet.add(norm);
+  }
+
   // ── geo-cache ──────────────────────────────────────────────────────────────
   _geoCache = new Map();
   try {
@@ -139,7 +161,7 @@ function loadCache(force = false) {
     }
   } catch (e) { console.warn('[cache] call log load failed:', e.message); }
 
-  console.log(`[cache] Ready — ${_contactsMap.size} AgentBox, ${_sqlContactsMap.size} SQL contacts, ${_rpMap.size} RP entries, ${_geoCache.size} geo entries.`);
+  console.log(`[cache] Ready — ${_contactsMap.size} AgentBox (${_agentboxAddrSet.size} addrs), ${_sqlContactsMap.size} SQL contacts, ${_rpMap.size} RP entries, ${_geoCache.size} geo entries.`);
 }
 
 // Warm cache on startup (non-fatal if data files are not yet present)
@@ -1273,6 +1295,11 @@ async function buildScoredContactsForManual(address, details, minCount = 0) {
     const contactStreetPart = contactAddrNorm.split(',')[0].trim();
     // Exclude vendor (exact street-part match including number)
     if (eventStreetPart && contactStreetPart && eventStreetPart === contactStreetPart) continue;
+    // AgentBox priority: suppress pf_ contacts when AgentBox has a contact at the same address
+    if (id.startsWith('pf_')) {
+      const norm = normalizeAddrForDedup(c.address || '');
+      if (norm && _agentboxAddrSet && _agentboxAddrSet.has(norm)) continue;
+    }
     candidateMap.set(id, {
       id,
       name:         c.name || 'Unknown',
