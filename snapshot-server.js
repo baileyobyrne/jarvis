@@ -639,8 +639,25 @@ app.get('/api/market', requireAuth, (req, res) => {
       ORDER BY detected_at DESC LIMIT 100
     `).all(String(days));
 
+    // Build pf_estimate lookup map from properties table (normalise street type abbreviations)
+    const normForPf = (addr) => (addr || '').toUpperCase()
+      .replace(/\bAVENUE\b/g, 'AVE').replace(/\bSTREET\b/g, 'ST')
+      .replace(/\bROAD\b/g, 'RD').replace(/\bDRIVE\b/g, 'DR')
+      .replace(/\bLANE\b/g, 'LN').replace(/\bPLACE\b/g, 'PL')
+      .replace(/\bCLOSE\b/g, 'CL').replace(/\bCRESCENT\b/g, 'CRES')
+      .replace(/\bCOURT\b/g, 'CT').replace(/\bPARADE\b/g, 'PDE')
+      .replace(/\bTERRACE\b/g, 'TCE').replace(/\s+/g, ' ').trim();
+    const pfProps = db.prepare(
+      "SELECT address, valuation_amount FROM properties WHERE valuation_amount IS NOT NULL AND valuation_amount != ''"
+    ).all();
+    const pfMap = new Map(pfProps.map(p => [normForPf(p.address), p.valuation_amount]));
+    const addPfEstimate = rows => rows.map(r => ({
+      ...r,
+      pf_estimate: r.proping_estimate || pfMap.get(normForPf(r.address)) || null
+    }));
+
     if (!includeHistorical) {
-      return res.json(liveRows);
+      return res.json(addPfEstimate(liveRows));
     }
 
     // Merge with historical_sales for the same date window
@@ -674,13 +691,13 @@ app.get('/api/market', requireAuth, (req, res) => {
       ORDER BY sale_date DESC LIMIT 200
     `).all(String(days));
 
-    // Merge and sort by detected_at desc, de-duplicate by address
-    const seen = new Set(liveRows.map(r => r.address));
+    // Merge and sort by detected_at desc, de-duplicate by normalised address
+    const seen = new Set(liveRows.map(r => normForPf(r.address)));
     const merged = [...liveRows];
     for (const h of histRows) {
-      if (!seen.has(h.address)) {
+      if (!seen.has(normForPf(h.address))) {
         merged.push(h);
-        seen.add(h.address);
+        seen.add(normForPf(h.address));
       }
     }
     merged.sort((a, b) => {
@@ -689,7 +706,7 @@ app.get('/api/market', requireAuth, (req, res) => {
       return tb - ta;
     });
 
-    res.json(merged.slice(0, 200));
+    res.json(addPfEstimate(merged.slice(0, 200)));
   } catch (e) {
     console.error('[GET /api/market]', e.message);
     res.status(500).json({ error: e.message });
@@ -1053,30 +1070,50 @@ function buildScoredContactsForManual(address, details, minCount = 20) {
   const listingCategory = categorizePropertyType(details.propertyType || 'House');
   const listingBeds = details.beds ? parseInt(details.beds) : null;
 
+  // Normalize event address and extract the street name keyword for proximity ranking
+  // e.g. "15A Second Avenue, Willoughby East" → streetKeyword = "SECOND"
+  // e.g. "3/89 Penshurst Street"              → streetKeyword = "PENSHURST"
+  const normEventAddr = address.toUpperCase().replace(/\s+/g, ' ').trim();
+  const eventStreetPart = normEventAddr.split(',')[0].trim();
+  const streetKeyword = (() => {
+    let s = eventStreetPart
+      .replace(/^[\d]+[A-Z]?\s*\/\s*[\d]+[A-Z]?\s+/, '') // "3/89 " unit prefix
+      .replace(/^[\d]+[A-Z]?\s+/, '');                     // "15A " or "22 " number prefix
+    // Strip trailing street type (STREET, AVE, etc.)
+    s = s.replace(/\s+(STREET|ST|AVENUE|AVE|ROAD|RD|DRIVE|DR|LANE|LN|PLACE|PL|CLOSE|CL|CRESCENT|CRES|COURT|CT|PARADE|PDE|TERRACE|TCE|WAY|GROVE|GR|BOULEVARD|BLVD)(\s.*)?$/i, '').trim();
+    const parts = s.split(/\s+/);
+    return parts[parts.length - 1] || '';
+  })();
+
   const LOCAL_SUBURBS = ['WILLOUGHBY', 'NORTH WILLOUGHBY', 'WILLOUGHBY EAST',
                          'CHATSWOOD', 'ARTARMON', 'NAREMBURN', 'CASTLE COVE', 'MIDDLE COVE'];
 
-  // Build candidate pool: all contacts in local suburbs
+  // Build candidate pool: all contacts in local suburbs, excluding the event property itself
   const candidates = [];
   for (const [id, contact] of (_contactsMap || new Map())) {
     if (!contact.mobile) continue;
     const cSuburb = normalizeSuburb(contact.suburb || '');
     if (!LOCAL_SUBURBS.includes(cSuburb)) continue;
-    const street   = (contact.address || '').toUpperCase().trim();
-    const rpKey    = `${street} ${cSuburb}`.trim();
-    const rpEntry  = _rpMap?.get(rpKey);
-    const score    = calcScore(contact, rpEntry);
-    candidates.push({ id, contact, rpEntry, score, suburb: cSuburb });
+    // Exclude the vendor — contact lives at the property being sold/listed
+    const contactAddrNorm = (contact.address || '').toUpperCase().replace(/\s+/g, ' ').trim();
+    const contactStreetPart = contactAddrNorm.split(',')[0].trim();
+    if (eventStreetPart && contactStreetPart && eventStreetPart === contactStreetPart) continue;
+    const rpKey   = `${contactAddrNorm} ${cSuburb}`.trim();
+    const rpEntry = _rpMap?.get(rpKey);
+    const score   = calcScore(contact, rpEntry);
+    // Proximity bonus: contacts on the same street rank first
+    const onSameStreet = streetKeyword.length >= 3 && contactAddrNorm.includes(streetKeyword);
+    candidates.push({ id, contact, rpEntry, score, onSameStreet });
   }
 
   function scoreWithFilter(bedTolerance, dropCategory) {
-    return candidates.map(({ id, contact, rpEntry, score }) => {
-      if (!rpEntry) return null;
+    return candidates.map(({ id, contact, rpEntry, score, onSameStreet }) => {
       if (!dropCategory) {
+        if (!rpEntry) return null;
         const contactCat = categorizePropertyType(rpEntry['Property Type'] || '');
         if (contactCat !== listingCategory) return null;
       }
-      if (!dropCategory && bedTolerance !== null && listingBeds !== null) {
+      if (!dropCategory && bedTolerance !== null && listingBeds !== null && rpEntry) {
         const contactBeds = parseInt(rpEntry['Bed'] || '0');
         if (contactBeds > 0 && Math.abs(listingBeds - contactBeds) > bedTolerance) return null;
       }
@@ -1086,7 +1123,7 @@ function buildScoredContactsForManual(address, details, minCount = 20) {
         mobile:   contact.mobile  || '',
         address:  [contact.address, contact.suburb].filter(Boolean).join(', '),
         distance: null,
-        score
+        score:    score + (onSameStreet ? 1000 : 0)
       };
     }).filter(Boolean).sort((a, b) => b.score - a.score);
   }
@@ -1099,9 +1136,9 @@ function buildScoredContactsForManual(address, details, minCount = 20) {
   ];
   for (const level of levels) {
     const scored = level();
-    if (scored.length >= minCount) return scored.slice(0, 20);
+    if (scored.length >= minCount) return scored.slice(0, 30);
   }
-  return scoreWithFilter(null, true).slice(0, 20);
+  return scoreWithFilter(null, true).slice(0, 30);
 }
 
 // POST /api/log-call — log a call outcome for a Just Sold / Just Listed contact
@@ -1129,14 +1166,37 @@ app.post('/api/market-events/manual', requireAuth, (req, res) => {
     if (!address || !type) {
       return res.status(400).json({ error: 'address and type are required' });
     }
-    const detectedSuburb = suburb || (() => {
-      const parts = address.split(',').map(s => s.trim());
-      return parts.length > 1 ? parts[parts.length - 1] : 'Willoughby';
-    })();
+    // Normalise to UPPERCASE for consistency with pricefinder data in the DB
+    const normAddress = address.toUpperCase().replace(/\s+/g, ' ').trim();
+    const detectedSuburb = suburb
+      ? suburb.toUpperCase().trim()
+      : (() => {
+          const parts = normAddress.split(',').map(s => s.trim());
+          return parts.length > 1 ? parts[parts.length - 1] : 'WILLOUGHBY';
+        })();
 
-    // 1. Build scored contacts
+    // 1. Look up pricefinder estimate for this specific property
+    let pfEstimate = null;
+    const streetPart = normAddress.split(',')[0].trim();
+    const numMatch   = streetPart.match(/^(\d+)/);
+    if (numMatch) {
+      const num = numMatch[1];
+      // Strip leading number/unit and trailing street type to get the keyword
+      const kw = streetPart
+        .replace(/^[\d]+[A-Z]?\s*\/?\s*[\d]*[A-Z]?\s+/, '')
+        .replace(/\s+(STREET|ST|AVENUE|AVE|ROAD|RD|DRIVE|DR|LANE|LN|PLACE|PL|CLOSE|CL|CRESCENT|CRES|COURT|CT|PARADE|PDE|TERRACE|TCE|WAY|GROVE|GR|BOULEVARD|BLVD)(\s.*)?$/i, '')
+        .split(/\s+/)[0] || '';
+      if (kw.length >= 3) {
+        const pfRow = db.prepare(
+          "SELECT valuation_amount FROM properties WHERE UPPER(address) LIKE ? AND UPPER(address) LIKE ? AND valuation_amount IS NOT NULL LIMIT 1"
+        ).get(`${num}%`, `%${kw}%`);
+        pfEstimate = pfRow?.valuation_amount || null;
+      }
+    }
+
+    // 2. Build scored contacts
     const details = { propertyType: property_type || 'House', beds: beds || null };
-    const scoredContacts = buildScoredContactsForManual(address, details, 20);
+    const scoredContacts = buildScoredContactsForManual(normAddress, details, 20);
     const topContacts = scoredContacts.map(c => ({
       id:       c.id       || '',
       name:     c.name,
@@ -1145,28 +1205,29 @@ app.post('/api/market-events/manual', requireAuth, (req, res) => {
       distance: c.distance ? Math.round(c.distance) : null
     }));
 
-    // 2. Insert into market_events (INSERT OR REPLACE logic: delete then insert)
+    // 3. Insert into market_events (INSERT OR REPLACE logic: delete then insert)
     db.prepare(`
       DELETE FROM market_events
       WHERE address = ? AND type = ? AND date(detected_at) = date('now', 'localtime')
-    `).run(address, type);
-    db.prepare(`
+    `).run(normAddress, type);
+    const insertResult = db.prepare(`
       INSERT INTO market_events
-        (detected_at, event_date, type, address, suburb, price,
+        (detected_at, event_date, type, address, suburb, price, proping_estimate,
          beds, baths, cars, property_type, source, top_contacts)
       VALUES
-        (datetime('now','localtime'), date('now','localtime'), ?, ?, ?, ?,
+        (datetime('now','localtime'), date('now','localtime'), ?, ?, ?, ?, ?,
          ?, ?, ?, ?, 'Manual', ?)
-    `).run(type, address, detectedSuburb, price || null,
+    `).run(type, normAddress, detectedSuburb, price || null, pfEstimate,
            beds || null, baths || null, cars || null,
            property_type || null, JSON.stringify(topContacts));
+    const newEventId = insertResult.lastInsertRowid;
 
-    // 3. Rebuild listing-alerts.json entry for this address+type
+    // 4. Rebuild listing-alerts.json entry for this address+type
     try {
       const newEntry = {
         detectedAt:   new Date().toISOString(),
         type,
-        address,
+        address:      normAddress,
         price:        price        || '',
         beds:         beds         || '',
         baths:        baths        || '',
@@ -1179,7 +1240,7 @@ app.post('/api/market-events/manual', requireAuth, (req, res) => {
       if (fs.existsSync(ALERTS_FILE)) {
         try { alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8')); } catch (_) { alerts = []; }
       }
-      const idx = alerts.findIndex(a => a.address === address && a.type === type);
+      const idx = alerts.findIndex(a => a.address === normAddress && a.type === type);
       if (idx >= 0) alerts[idx] = newEntry; else alerts.push(newEntry);
       alerts = alerts.slice(-20);
       fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
@@ -1187,10 +1248,119 @@ app.post('/api/market-events/manual', requireAuth, (req, res) => {
       console.error('[/api/market-events/manual] alerts write failed:', e.message);
     }
 
-    console.log(`[POST /api/market-events/manual] ${type} @ ${address} — ${topContacts.length} contacts`);
-    res.json({ ok: true, contactCount: topContacts.length });
+    console.log(`[POST /api/market-events/manual] ${type} @ ${normAddress} — ${topContacts.length} contacts, est=${pfEstimate}`);
+    res.json({ ok: true, contactCount: topContacts.length, id: newEventId, pfEstimate });
   } catch (e) {
     console.error('[POST /api/market-events/manual]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PATCH /api/market-events/:id — edit an existing market event
+app.patch('/api/market-events/:id', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const existing = db.prepare('SELECT * FROM market_events WHERE id = ?').get(id);
+    if (!existing) return res.status(404).json({ error: 'not found' });
+
+    const { address, type, beds, baths, cars, property_type, price, suburb } = req.body;
+    const normAddress = address
+      ? address.toUpperCase().replace(/\s+/g, ' ').trim()
+      : existing.address;
+    const newType    = type    || existing.type;
+    const newSuburb  = suburb
+      ? suburb.toUpperCase().trim()
+      : (() => {
+          const parts = normAddress.split(',').map(s => s.trim());
+          return parts.length > 1 ? parts[parts.length - 1] : existing.suburb;
+        })();
+
+    // Re-look up pf estimate if address changed
+    let pfEstimate = existing.proping_estimate;
+    if (address) {
+      const streetPart = normAddress.split(',')[0].trim();
+      const numMatch   = streetPart.match(/^(\d+)/);
+      if (numMatch) {
+        const num = numMatch[1];
+        const kw = streetPart
+          .replace(/^[\d]+[A-Z]?\s*\/?\s*[\d]*[A-Z]?\s+/, '')
+          .replace(/\s+(STREET|ST|AVENUE|AVE|ROAD|RD|DRIVE|DR|LANE|LN|PLACE|PL|CLOSE|CL|CRESCENT|CRES|COURT|CT|PARADE|PDE|TERRACE|TCE|WAY|GROVE|GR|BOULEVARD|BLVD)(\s.*)?$/i, '')
+          .split(/\s+/)[0] || '';
+        if (kw.length >= 3) {
+          const pfRow = db.prepare(
+            "SELECT valuation_amount FROM properties WHERE UPPER(address) LIKE ? AND UPPER(address) LIKE ? AND valuation_amount IS NOT NULL LIMIT 1"
+          ).get(`${num}%`, `%${kw}%`);
+          pfEstimate = pfRow?.valuation_amount || null;
+        }
+      }
+    }
+
+    // Rebuild contacts if address or property type changed
+    let topContacts;
+    if (address || property_type || beds) {
+      const details = { propertyType: property_type || existing.property_type || 'House', beds: beds || existing.beds || null };
+      const scored = buildScoredContactsForManual(normAddress, details, 20);
+      topContacts = scored.map(c => ({
+        id: c.id || '', name: c.name, mobile: c.mobile || '', address: c.address || '', distance: null
+      }));
+    } else {
+      topContacts = existing.top_contacts ? JSON.parse(existing.top_contacts) : [];
+    }
+
+    db.prepare(`
+      UPDATE market_events SET
+        address = ?, suburb = ?, type = ?, price = ?, proping_estimate = ?,
+        beds = ?, baths = ?, cars = ?, property_type = ?, top_contacts = ?
+      WHERE id = ?
+    `).run(normAddress, newSuburb, newType, price !== undefined ? (price || null) : existing.price,
+           pfEstimate,
+           beds !== undefined ? (beds || null) : existing.beds,
+           baths !== undefined ? (baths || null) : existing.baths,
+           cars !== undefined ? (cars || null) : existing.cars,
+           property_type !== undefined ? (property_type || null) : existing.property_type,
+           JSON.stringify(topContacts), id);
+
+    // Update listing-alerts.json too
+    try {
+      if (fs.existsSync(ALERTS_FILE)) {
+        let alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
+        const idx = alerts.findIndex(a => a.address === existing.address && a.type === existing.type);
+        if (idx >= 0) {
+          alerts[idx] = { ...alerts[idx], address: normAddress, type: newType,
+            price: price || '', beds: beds || '', baths: baths || '', cars: cars || '',
+            propertyType: property_type || '', topContacts };
+          fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
+        }
+      }
+    } catch (_) {}
+
+    res.json({ ok: true, contactCount: topContacts.length });
+  } catch (e) {
+    console.error('[PATCH /api/market-events/:id]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/market-events/:id — remove a market event
+app.delete('/api/market-events/:id', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const existing = db.prepare('SELECT address, type FROM market_events WHERE id = ?').get(id);
+    if (!existing) return res.status(404).json({ error: 'not found' });
+    db.prepare('DELETE FROM market_events WHERE id = ?').run(id);
+    // Remove from listing-alerts.json
+    try {
+      if (fs.existsSync(ALERTS_FILE)) {
+        let alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
+        alerts = alerts.filter(a => !(a.address === existing.address && a.type === existing.type));
+        fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
+      }
+    } catch (_) {}
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[DELETE /api/market-events/:id]', e.message);
     res.status(500).json({ error: e.message });
   }
 });

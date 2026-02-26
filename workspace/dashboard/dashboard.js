@@ -10,7 +10,7 @@ const {
   MapPin, Calendar, Check, X, AlertCircle, Home, Activity,
   MessageSquare, PhoneCall, PhoneOff, PhoneMissed, Star, RefreshCw,
   History, Menu, Building2, CheckCircle, Bed, Bath, Car, Plus, Mail,
-  Search
+  Search, Pencil, Trash2
 } = LucideReact;
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -927,8 +927,17 @@ function CallsPage({ token, onReminderCountChange }) {
 }
 
 // ── Add Market Event Modal ──────────────────────────────────────────────────
-function AddEventModal({ token, onClose, onAdded }) {
-  const [form, setForm] = useState({ address: '', type: 'sold', beds: '', baths: '', cars: '', property_type: 'House', price: '' });
+function AddEventModal({ token, onClose, onAdded, editEvent }) {
+  const isEdit = !!editEvent;
+  const [form, setForm] = useState({
+    address:       editEvent?.address       || '',
+    type:          editEvent?.type          || 'sold',
+    beds:          editEvent?.beds          || '',
+    baths:         editEvent?.baths         || '',
+    cars:          editEvent?.cars          || '',
+    property_type: editEvent?.property_type || 'House',
+    price:         editEvent?.price         || '',
+  });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -939,17 +948,16 @@ function AddEventModal({ token, onClose, onAdded }) {
     setSaving(true);
     setError('');
     try {
-      const res = await apiFetch('/api/market-events/manual', token, {
-        method: 'POST',
-        body: JSON.stringify(form)
-      });
+      const url    = isEdit ? `/api/market-events/${editEvent.id}` : '/api/market-events/manual';
+      const method = isEdit ? 'PATCH' : 'POST';
+      const res = await apiFetch(url, token, { method, body: JSON.stringify(form) });
       if (res.ok) {
         const data = await res.json();
         onAdded(data.contactCount);
         onClose();
       } else {
         const err = await res.json();
-        setError(err.error || 'Failed to add event');
+        setError(err.error || 'Failed to save event');
       }
     } catch (e) { setError('Network error'); }
     finally { setSaving(false); }
@@ -958,7 +966,7 @@ function AddEventModal({ token, onClose, onAdded }) {
   return (
     <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
       <div className="modal-box">
-        <div className="modal-title">Add Market Event</div>
+        <div className="modal-title">{isEdit ? 'Edit Market Event' : 'Add Market Event'}</div>
 
         <label className="form-label">Address *</label>
         <input className="form-input" type="text" placeholder="3/89 Penshurst Street, North Willoughby" value={form.address} onChange={e => set('address', e.target.value)} />
@@ -1001,7 +1009,7 @@ function AddEventModal({ token, onClose, onAdded }) {
         <div className="modal-actions">
           <button className="modal-btn-cancel" onClick={onClose}>Cancel</button>
           <button className="modal-btn-save" onClick={handleSubmit} disabled={saving}>
-            {saving ? 'Adding…' : 'Add Event'}
+            {saving ? (isEdit ? 'Saving…' : 'Adding…') : (isEdit ? 'Save Changes' : 'Add Event')}
           </button>
         </div>
       </div>
@@ -1014,7 +1022,9 @@ function MarketPage({ token }) {
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
-  const [addedMsg, setAddedMsg] = useState('');
+  const [editEvent, setEditEvent] = useState(null);
+  const [actionMsg, setActionMsg] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
 
   const loadEvents = useCallback(() => {
     setLoading(true);
@@ -1027,9 +1037,23 @@ function MarketPage({ token }) {
   useEffect(() => { loadEvents(); }, [loadEvents]);
 
   const handleAdded = (contactCount) => {
-    setAddedMsg(`✅ Event added — ${contactCount} contacts flagged`);
+    const verb = editEvent ? 'updated' : 'added';
+    setActionMsg(`✅ Event ${verb} — ${contactCount} contacts flagged`);
+    setEditEvent(null);
     loadEvents();
-    setTimeout(() => setAddedMsg(''), 5000);
+    setTimeout(() => setActionMsg(''), 5000);
+  };
+
+  const handleDelete = async (id) => {
+    try {
+      const res = await apiFetch(`/api/market-events/${id}`, token, { method: 'DELETE' });
+      if (res.ok) {
+        setEvents(prev => prev.filter(e => e.id !== id));
+        setActionMsg('Event removed');
+        setTimeout(() => setActionMsg(''), 3000);
+      }
+    } catch (_) {}
+    setConfirmDeleteId(null);
   };
 
   const typeClass = {
@@ -1045,13 +1069,13 @@ function MarketPage({ token }) {
     <div className="page-body">
       {/* Header row with Add Event button */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-        {addedMsg && (
-          <span style={{ marginRight: 'auto', color: '#22c55e', fontSize: 12, fontFamily: 'var(--font-mono)' }}>{addedMsg}</span>
+        {actionMsg && (
+          <span style={{ marginRight: 'auto', color: '#22c55e', fontSize: 12, fontFamily: 'var(--font-mono)' }}>{actionMsg}</span>
         )}
         <button
           className="topup-btn"
           style={{ fontSize: 11, padding: '6px 14px', gap: 5, display: 'flex', alignItems: 'center' }}
-          onClick={() => setShowAddModal(true)}
+          onClick={() => { setEditEvent(null); setShowAddModal(true); }}
         >
           <Plus size={12} /> Add Event
         </button>
@@ -1065,27 +1089,56 @@ function MarketPage({ token }) {
         </div>
       ) : (
         <div className="event-list">
-          {events.map((ev, i) => (
-            <div className="event-card" key={ev.id || i} style={{ animationDelay: `${i * 0.03}s` }}>
-              <span className={`event-type-badge ${typeClass[ev.event_type] || typeClass[ev.type] || 'type-listing'}`}>
-                {ev.event_type || ev.type || 'event'}
-              </span>
-              <div className="event-body">
-                <div className="event-addr">{ev.address || '—'}</div>
-                <div className="event-detail">
-                  {[ev.suburb, ev.beds && `${ev.beds}bd`, ev.baths && `${ev.baths}ba`,
-                    ev.property_type, ev.price || ev.listing_price]
-                    .filter(Boolean).join(' · ')}
+          {events.map((ev, i) => {
+            const displayPrice = ev.price || ev.pf_estimate;
+            const priceLabel   = ev.price ? ev.price : (ev.pf_estimate ? `Est. ${ev.pf_estimate}` : null);
+            const isManual     = ev.source === 'Manual';
+            const isDeleting   = confirmDeleteId === ev.id;
+            return (
+              <div className="event-card" key={ev.id || i} style={{ animationDelay: `${i * 0.03}s` }}>
+                <span className={`event-type-badge ${typeClass[ev.event_type] || typeClass[ev.type] || 'type-listing'}`}>
+                  {ev.event_type || ev.type || 'event'}
+                </span>
+                <div className="event-body">
+                  <div className="event-addr">{ev.address || '—'}</div>
+                  <div className="event-detail">
+                    {[ev.suburb, ev.beds && `${ev.beds}bd`, ev.baths && `${ev.baths}ba`,
+                      ev.property_type, priceLabel]
+                      .filter(Boolean).join(' · ')}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, flexShrink: 0 }}>
+                  <div className="event-meta">{timeAgo(ev.detected_at || ev.event_date)}</div>
+                  {isManual && (
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      {isDeleting ? (
+                        <>
+                          <span style={{ fontSize: 10, color: 'var(--text-muted)', alignSelf: 'center' }}>Delete?</span>
+                          <button onClick={() => handleDelete(ev.id)} style={{ background: '#ef4444', border: 'none', color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 10, cursor: 'pointer' }}>Yes</button>
+                          <button onClick={() => setConfirmDeleteId(null)} style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', color: 'var(--text-muted)', borderRadius: 4, padding: '2px 8px', fontSize: 10, cursor: 'pointer' }}>No</button>
+                        </>
+                      ) : (
+                        <>
+                          <button onClick={() => { setEditEvent(ev); setShowAddModal(true); }} title="Edit" style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><Pencil size={12} /></button>
+                          <button onClick={() => setConfirmDeleteId(ev.id)} title="Delete" style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><Trash2 size={12} /></button>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
-              <div className="event-meta">{timeAgo(ev.detected_at || ev.event_date)}</div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
       {showAddModal && (
-        <AddEventModal token={token} onClose={() => setShowAddModal(false)} onAdded={handleAdded} />
+        <AddEventModal
+          token={token}
+          onClose={() => { setShowAddModal(false); setEditEvent(null); }}
+          onAdded={handleAdded}
+          editEvent={editEvent}
+        />
       )}
     </div>
   );
