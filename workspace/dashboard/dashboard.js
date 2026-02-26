@@ -605,6 +605,13 @@ function ProspectCard({ contact, onLogged, token, eventType, eventAddress }) {
       {contact.address && (
         <div className="prospect-addr">{contact.address}</div>
       )}
+      {contact.status === 'snoozed' && contact.snooze_until && (
+        <div className="prospect-snoozed">
+          Retry {new Date(contact.snooze_until).toLocaleDateString('en-AU', {
+            weekday: 'short', day: 'numeric', month: 'short'
+          })}
+        </div>
+      )}
       {localOutcome ? (
         <div className="prospect-logged">
           <Check size={10} />

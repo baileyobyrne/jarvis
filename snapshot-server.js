@@ -370,10 +370,10 @@ app.get('/api/status', (req, res) => {
   try {
     loadCache();
     const todayCount  = db.prepare(
-      "SELECT COUNT(*) AS n FROM daily_plans WHERE plan_date = date('now','localtime')"
+      "SELECT COUNT(*) AS n FROM call_queue WHERE status IN ('active','snoozed')"
     ).get().n;
     const calledCount = db.prepare(
-      "SELECT COUNT(*) AS n FROM daily_plans WHERE plan_date = date('now','localtime') AND called_at IS NOT NULL"
+      "SELECT COUNT(*) AS n FROM call_queue WHERE last_called_at IS NOT NULL AND date(last_called_at,'localtime') = date('now','localtime')"
     ).get().n;
     let lastRun = null;
     if (fs.existsSync(LOG_FILE)) {
@@ -698,22 +698,39 @@ app.post('/snapshot', (req, res) => {
 
 // ─── DB-backed API routes ──────────────────────────────────────────────────────
 
-// GET /api/plan/today
+// GET /api/plan/today — reads from persistent call_queue
 app.get('/api/plan/today', requireAuth, (req, res) => {
   try {
     const rows = db.prepare(`
-      SELECT dp.*,
-             c.name, c.mobile, c.address, c.suburb,
-             c.propensity_score AS contact_score,
-             c.tenure_years, c.occupancy AS contact_occupancy,
-             c.beds, c.baths, c.cars, c.property_type AS contact_property_type,
-             c.pricefinder_estimate, c.pricefinder_fetched_at
-      FROM daily_plans dp
-      LEFT JOIN contacts c ON c.id = dp.contact_id
-      WHERE dp.plan_date = date('now', 'localtime')
+      SELECT
+        cq.*,
+        cq.last_outcome   AS outcome,
+        cq.last_called_at AS called_at,
+        c.name, c.mobile, c.address, c.suburb,
+        c.propensity_score AS contact_score,
+        c.tenure_years, c.occupancy AS contact_occupancy,
+        c.beds, c.baths, c.cars, c.property_type AS contact_property_type,
+        c.contact_class, c.pricefinder_estimate, c.pricefinder_fetched_at,
+        COALESCE((
+          SELECT 1 FROM market_events me
+          WHERE me.detected_at >= datetime('now', '-30 days')
+            AND me.top_contacts IS NOT NULL
+            AND (me.top_contacts LIKE '%"id":"' || cq.contact_id || '"%'
+              OR me.top_contacts LIKE '%"id": "' || cq.contact_id || '"%')
+          LIMIT 1
+        ), 0) AS market_boost,
+        CAST((julianday('now') - julianday(COALESCE(cq.last_called_at, cq.added_at))) AS INTEGER)
+          AS days_since_last_call
+      FROM call_queue cq
+      LEFT JOIN contacts c ON c.id = cq.contact_id
+      WHERE (cq.status = 'active')
+         OR (cq.status = 'snoozed' AND cq.snooze_until <= datetime('now','localtime'))
       ORDER BY
-        CASE WHEN dp.called_at IS NULL THEN 0 ELSE 1 END ASC,
-        COALESCE(dp.propensity_score, c.propensity_score) DESC
+        market_boost DESC,
+        cq.propensity_score DESC,
+        days_since_last_call DESC,
+        cq.added_at ASC
+      LIMIT 30
     `).all();
     res.json(rows);
   } catch (e) {
@@ -722,34 +739,25 @@ app.get('/api/plan/today', requireAuth, (req, res) => {
   }
 });
 
-// POST /api/plan/topup?n=10 — score & add N more contacts to today's plan on demand
+// POST /api/plan/topup?n=10 — score & add N more contacts to the persistent call_queue
 app.post('/api/plan/topup', requireAuth, (req, res) => {
   try {
     loadCache();
     const n = Math.min(Math.max(parseInt(req.query.n) || 10, 1), 30);
 
-    const planDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
-
-    // Contacts already on today's board
-    const plannedToday = new Set(
-      db.prepare("SELECT contact_id FROM daily_plans WHERE plan_date = ?").all(planDate).map(r => r.contact_id)
+    // Contacts already in queue (active, snoozed, or done-with-cooldown)
+    const inQueue = new Set(
+      db.prepare(`
+        SELECT contact_id FROM call_queue
+        WHERE status IN ('active','snoozed')
+           OR (status = 'done' AND (cooldown_until IS NULL OR cooldown_until > datetime('now','localtime')))
+      `).all().map(r => r.contact_id)
     );
 
-    // Contacts on 90-day cooldown
-    const rawCooldown = fs.existsSync(COOLDOWN_FILE)
-      ? JSON.parse(fs.readFileSync(COOLDOWN_FILE, 'utf8'))
-      : {};
-    const now = Date.now();
-    const onCooldown = new Set(
-      Object.entries(rawCooldown)
-        .filter(([, e]) => now - new Date(e.plannedAt).getTime() < (e.cooldownDays || 90) * 86400000)
-        .map(([id]) => id)
-    );
-
-    // Score all eligible contacts
+    // Score all eligible contacts (not already in queue with active lock)
     const scored = [];
     for (const [id, contact] of _contactsMap) {
-      if (plannedToday.has(id) || onCooldown.has(id)) continue;
+      if (inQueue.has(id)) continue;
       const street  = (contact.address || '').toUpperCase().trim();
       const suburb  = normalizeSuburb(contact.suburb || '');
       const rpKey   = `${street} ${suburb}`.trim();
@@ -767,16 +775,25 @@ app.post('/api/plan/topup', requireAuth, (req, res) => {
         propensity_score = excluded.propensity_score,
         updated_at       = datetime('now')
     `);
-    const insertPlan = db.prepare(`
-      INSERT OR IGNORE INTO daily_plans
-        (plan_date, contact_id, propensity_score, intel, angle, tenure, property_type, occupancy, source, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'topup', datetime('now', 'localtime'))
+    const upsertQueue = db.prepare(`
+      INSERT INTO call_queue
+        (contact_id, status, propensity_score, intel, angle, tenure, property_type,
+         occupancy, added_at, updated_at)
+      VALUES (?, 'active', ?, ?, ?, ?, ?, ?, datetime('now','localtime'), datetime('now','localtime'))
+      ON CONFLICT(contact_id) DO UPDATE SET
+        status           = 'active',
+        propensity_score = excluded.propensity_score,
+        intel            = excluded.intel,
+        angle            = excluded.angle,
+        tenure           = excluded.tenure,
+        property_type    = excluded.property_type,
+        occupancy        = excluded.occupancy,
+        snooze_until     = NULL,
+        cooldown_until   = NULL,
+        updated_at       = datetime('now','localtime')
     `);
 
     let added = 0;
-    const nowIso = new Date().toISOString();
-    const updatedCooldown = { ...rawCooldown };
-
     for (const { id, contact, rpEntry, score } of topN) {
       const saleDate    = rpEntry?.['Sale Date'] || '';
       const saleYearM   = saleDate.match(/\d{4}/);
@@ -791,8 +808,8 @@ app.post('/api/plan/topup', requireAuth, (req, res) => {
         suburb:  contact.suburb  || '',
       });
 
-      const r = insertPlan.run(
-        planDate, id, score,
+      const r = upsertQueue.run(
+        id, score,
         buildIntel(contact, rpEntry),
         buildAngle(contact, rpEntry),
         tenure,
@@ -800,24 +817,33 @@ app.post('/api/plan/topup', requireAuth, (req, res) => {
         rpEntry?.['Owner Type']    || contact.occupancy    || ''
       );
       if (r.changes) added++;
-
-      // Lock contact into 90-day cooldown
-      updatedCooldown[id] = {
-        plannedAt:     nowIso,
-        name:          contact.name,
-        cooldownDays:  90,
-        address:       contact.address,
-        mobile:        contact.mobile,
-        propensityScore: score,
-        source:        'topup',
-      };
     }
 
-    fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(updatedCooldown, null, 2));
-    console.log(`[POST /api/plan/topup] Added ${added} contacts to today's plan.`);
+    console.log(`[POST /api/plan/topup] Added/re-activated ${added} contacts in call_queue.`);
     res.json({ ok: true, added, requested: n });
   } catch (e) {
     console.error('[POST /api/plan/topup]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/queue/reactivate-cooldowns — flip expired 'done' entries back to 'active'
+app.post('/api/queue/reactivate-cooldowns', requireAuth, (req, res) => {
+  try {
+    const result = db.prepare(`
+      UPDATE call_queue
+      SET status         = 'active',
+          cooldown_until = NULL,
+          snooze_until   = NULL,
+          updated_at     = datetime('now','localtime')
+      WHERE status = 'done'
+        AND cooldown_until IS NOT NULL
+        AND cooldown_until <= datetime('now','localtime')
+    `).run();
+    console.log(`[POST /api/queue/reactivate-cooldowns] Reactivated ${result.changes} contacts.`);
+    res.json({ ok: true, reactivated: result.changes });
+  } catch (e) {
+    console.error('[POST /api/queue/reactivate-cooldowns]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -827,19 +853,69 @@ app.patch('/api/plan/:contactId/outcome', requireAuth, (req, res) => {
   try {
     const { contactId } = req.params;
     const { outcome, notes } = req.body;
-    const result = db.prepare(`
-      UPDATE daily_plans
-      SET called_at = datetime('now', 'localtime'), outcome = ?, notes = ?
-      WHERE plan_date = date('now', 'localtime') AND contact_id = ?
-    `).run(outcome, notes, contactId);
-    if (!result.changes) {
-      return res.status(404).json({ error: 'Contact not in today\'s plan' });
+
+    // Compute queue state from outcome
+    const plusDays = (d) => {
+      const dt = new Date();
+      dt.setDate(dt.getDate() + d);
+      // Format as SQLite localtime string
+      const pad = n => String(n).padStart(2, '0');
+      return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+    };
+
+    let queueStatus, snoozeUntil = null, cooldownUntil = null;
+    if (outcome === 'left_message') {
+      queueStatus  = 'snoozed';
+      snoozeUntil  = plusDays(3);
+    } else if (outcome === 'no_answer') {
+      queueStatus  = 'snoozed';
+      snoozeUntil  = plusDays(2);
+    } else {
+      queueStatus  = 'done';
+      if (outcome === 'connected' || outcome === 'not_interested') {
+        cooldownUntil = plusDays(120);
+      }
     }
-    db.prepare(`
+
+    const planDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+
+    const stmtEnsureQueue = db.prepare(`
+      INSERT OR IGNORE INTO call_queue (contact_id, status, added_at, updated_at)
+      VALUES (?, 'active', datetime('now','localtime'), datetime('now','localtime'))
+    `);
+    const stmtUpdateQueue = db.prepare(`
+      UPDATE call_queue
+      SET status         = ?,
+          last_outcome   = ?,
+          last_called_at = datetime('now','localtime'),
+          snooze_until   = ?,
+          cooldown_until = ?,
+          updated_at     = datetime('now','localtime')
+      WHERE contact_id = ?
+    `);
+    const stmtCallLog = db.prepare(`
       INSERT INTO call_log (contact_id, called_at, outcome, notes)
       VALUES (?, datetime('now', 'localtime'), ?, ?)
-    `).run(contactId, outcome, notes);
-    res.json({ ok: true });
+    `);
+    const stmtPlanInsert = db.prepare(`
+      INSERT OR IGNORE INTO daily_plans (plan_date, contact_id, source, created_at)
+      VALUES (?, ?, 'queue', datetime('now','localtime'))
+    `);
+    const stmtPlanUpdate = db.prepare(`
+      UPDATE daily_plans
+      SET called_at = datetime('now','localtime'), outcome = ?, notes = ?
+      WHERE plan_date = ? AND contact_id = ?
+    `);
+
+    db.transaction(() => {
+      stmtEnsureQueue.run(contactId);
+      stmtUpdateQueue.run(queueStatus, outcome, snoozeUntil, cooldownUntil, contactId);
+      stmtCallLog.run(contactId, outcome, notes);
+      stmtPlanInsert.run(planDate, contactId);
+      stmtPlanUpdate.run(outcome, notes, planDate, contactId);
+    })();
+
+    res.json({ ok: true, queueStatus, snoozeUntil, cooldownUntil });
   } catch (e) {
     console.error('[PATCH /api/plan/:contactId/outcome]', e.message);
     res.status(500).json({ error: e.message });
@@ -1993,18 +2069,44 @@ app.get('/api/contacts/:id/history', requireAuth, (req, res) => {
   }
 });
 
-// POST /api/plan/add — add a single contact to today's plan from search results
+// POST /api/plan/add — add a single contact to the call_queue (and daily_plans audit trail)
 app.post('/api/plan/add', requireAuth, (req, res) => {
   try {
     const { contact_id } = req.body;
     if (!contact_id) return res.status(400).json({ error: 'contact_id is required' });
 
     const planDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+    const cid = String(contact_id);
 
-    const r = db.prepare(`
+    // Audit trail: daily_plans
+    db.prepare(`
       INSERT OR IGNORE INTO daily_plans (plan_date, contact_id, source, created_at)
       VALUES (?, ?, 'search', datetime('now', 'localtime'))
-    `).run(planDate, String(contact_id));
+    `).run(planDate, cid);
+
+    // Enrich from contacts table for queue metadata
+    const c = db.prepare(
+      'SELECT propensity_score, tenure_years, property_type, occupancy, contact_class FROM contacts WHERE id = ?'
+    ).get(cid);
+
+    // Add to call_queue — re-activate if previously done
+    const r = db.prepare(`
+      INSERT INTO call_queue
+        (contact_id, status, propensity_score, tenure, property_type, occupancy,
+         contact_class, added_at, updated_at)
+      VALUES (?, 'active', ?, ?, ?, ?, ?, datetime('now','localtime'), datetime('now','localtime'))
+      ON CONFLICT(contact_id) DO UPDATE SET
+        status         = CASE WHEN status = 'done' THEN 'active' ELSE status END,
+        updated_at     = datetime('now','localtime')
+      WHERE excluded.status = 'done' OR call_queue.status != 'done'
+    `).run(
+      cid,
+      c?.propensity_score || 0,
+      c?.tenure_years ? `${c.tenure_years} years` : null,
+      c?.property_type || null,
+      c?.occupancy     || null,
+      c?.contact_class || null
+    );
 
     res.json({ ok: true, added: r.changes > 0 });
   } catch (e) {

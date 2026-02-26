@@ -27,7 +27,7 @@ const DRY_RUN = process.argv.includes('--dry-run');
 const CONTACTS_FILE = '/root/.openclaw/workspace/willoughby-contacts.json';
 const RP_DATA_FILE = '/root/.openclaw/workspace/rp_data.csv';
 const COOLDOWN_FILE = '/root/.openclaw/workspace/recently-planned.json';
-const COOLDOWN_DAYS = 90;         // days before a daily-planned contact is eligible again
+const COOLDOWN_DAYS = 120;        // days before a daily-planned contact is eligible again
 const DAILY_TARGET = 30;          // maximum cards on the board at any one time
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -285,6 +285,24 @@ function writeToDB(finalPayload) {
             occupancy        = excluded.occupancy
     `);
 
+    const upsertQueue = db.prepare(`
+        INSERT INTO call_queue
+            (contact_id, status, propensity_score, intel, angle, tenure,
+             property_type, occupancy, contact_class, added_at, updated_at)
+        VALUES
+            (?, 'active', ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'), datetime('now','localtime'))
+        ON CONFLICT(contact_id) DO UPDATE SET
+            propensity_score = excluded.propensity_score,
+            intel            = excluded.intel,
+            angle            = excluded.angle,
+            tenure           = excluded.tenure,
+            property_type    = excluded.property_type,
+            occupancy        = excluded.occupancy,
+            contact_class    = excluded.contact_class,
+            updated_at       = datetime('now','localtime')
+        WHERE call_queue.status = 'active'
+    `);
+
     const runWrites = db.transaction(() => {
         for (const contact of finalPayload) {
             const tenureInt = parseInt(contact.tenure);
@@ -316,12 +334,23 @@ function writeToDB(finalPayload) {
                 occupancy:        contact.occupancy    || null,
                 created_at:       now
             });
+
+            upsertQueue.run(
+                contact.id,
+                contact.score,
+                contact.intel        || null,
+                contact.angle        || null,
+                contact.tenure       || null,
+                contact.propertyType || null,
+                contact.occupancy    || null,
+                contact.contactClass || null
+            );
         }
     });
 
     try {
         runWrites();
-        console.log(`[db] SQLite: ${finalPayload.length} contacts upserted → contacts + daily_plans.`);
+        console.log(`[db] SQLite: ${finalPayload.length} contacts upserted → contacts + daily_plans + call_queue.`);
     } catch (err) {
         console.error('[db] SQLite write failed (non-fatal):', err.message);
     }
@@ -382,17 +411,18 @@ async function main() {
     const contacts = contactsData.contacts;
 
     // ─── BOARD STATE CHECK ───────────────────────────────────────────────────
-    const planDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
-    const cooldown = loadCooldown();
+    // Board-full guard reads from call_queue (persistent — not date-partitioned)
     const todayCount = db.prepare(
-        'SELECT COUNT(*) AS n FROM daily_plans WHERE plan_date = ?'
-    ).get(planDate).n;
+        "SELECT COUNT(*) AS n FROM call_queue WHERE status IN ('active','snoozed')"
+    ).get().n;
     const targetCalls = DAILY_TARGET - todayCount;
     if (targetCalls <= 0) {
-        console.log(`Board is full — ${todayCount} contacts already planned today. Nothing to do.`);
+        console.log(`Queue is full — ${todayCount} contacts active/snoozed. Nothing to add.`);
         return;
     }
-    console.log(`Today's board: ${todayCount} already planned. Slots available: ${targetCalls}.`);
+    console.log(`Queue: ${todayCount} active/snoozed. Slots available: ${targetCalls}.`);
+    const planDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+    const cooldown = loadCooldown();
     // ─────────────────────────────────────────────────────────────────────────
 
     // Filter to McGrath Willoughby territory
@@ -407,12 +437,21 @@ async function main() {
     });
     console.log(`Area filter: ${contacts.length - areaContacts.length} contacts outside territory excluded. ${areaContacts.length} in area.`);
 
-    // Filter out contacts on cooldown (local 90-day)
+    // Build exclusion set from call_queue (active/snoozed/done-with-cooldown)
+    const queueExcluded = new Set(
+        db.prepare(`
+            SELECT contact_id FROM call_queue
+            WHERE status IN ('active','snoozed')
+               OR (status = 'done' AND (cooldown_until IS NULL OR cooldown_until > datetime('now','localtime')))
+        `).all().map(r => r.contact_id)
+    );
+
+    // Filter out contacts already in queue or on local JSON cooldown
     const eligibleContacts = areaContacts.filter(c => {
         const id = c.id || c.mobile;
-        return !isOnCooldown(id, cooldown);
+        return !queueExcluded.has(id) && !isOnCooldown(id, cooldown);
     });
-    console.log(`Cooldown filter: ${areaContacts.length - eligibleContacts.length} contacts excluded. ${eligibleContacts.length} eligible.`);
+    console.log(`Exclusion filter: ${areaContacts.length - eligibleContacts.length} contacts excluded (queue+cooldown). ${eligibleContacts.length} eligible.`);
 
     console.log('Scoring contacts...');
     const scoredContacts = eligibleContacts.map(contact => {
@@ -493,6 +532,26 @@ async function main() {
 
     // ─── SQLITE (parallel write — JSON above is the fallback during migration) ─
     writeToDB(finalPayload);
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ─── RE-ACTIVATE EXPIRED COOLDOWNS ───────────────────────────────────────
+    try {
+        const reactivated = db.prepare(`
+            UPDATE call_queue
+            SET status         = 'active',
+                cooldown_until = NULL,
+                snooze_until   = NULL,
+                updated_at     = datetime('now','localtime')
+            WHERE status = 'done'
+              AND cooldown_until IS NOT NULL
+              AND cooldown_until <= datetime('now','localtime')
+        `).run();
+        if (reactivated.changes > 0) {
+            console.log(`[queue] Re-activated ${reactivated.changes} contacts with expired cooldowns.`);
+        }
+    } catch (e) {
+        console.error('[queue] Re-activation pass failed (non-fatal):', e.message);
+    }
     // ─────────────────────────────────────────────────────────────────────────
 
     // ─── TELEGRAM MORNING BRIEFING ────────────────────────────────────────────

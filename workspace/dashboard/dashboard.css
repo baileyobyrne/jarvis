@@ -2515,3 +2515,13 @@ body::before {
   font-weight: 700; letter-spacing: 0.08em;
   color: var(--gold); margin-bottom: 6px; text-transform: uppercase;
 }
+
+/* ── Snooze indicator on ProspectCard ─────────────────────────────────────── */
+.prospect-snoozed {
+  font-size: 9px;
+  font-style: italic;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+  opacity: 0.75;
+}
