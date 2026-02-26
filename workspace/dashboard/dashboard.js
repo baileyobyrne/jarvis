@@ -1033,6 +1033,7 @@ function MarketPage({ token }) {
   const [editEvent, setEditEvent] = useState(null);
   const [actionMsg, setActionMsg] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [refreshingId, setRefreshingId] = useState(null);
 
   const loadEvents = useCallback(() => {
     setLoading(true);
@@ -1062,6 +1063,29 @@ function MarketPage({ token }) {
       }
     } catch (_) {}
     setConfirmDeleteId(null);
+  };
+
+  const handleRefresh = async (ev) => {
+    if (!ev.id || refreshingId) return;
+    setRefreshingId(ev.id);
+    try {
+      const res = await apiFetch(`/api/market-events/${ev.id}`, token, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          address: ev.address, type: ev.type,
+          beds: ev.beds, baths: ev.baths, cars: ev.cars,
+          property_type: ev.property_type, price: ev.price,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setActionMsg(`✅ Contacts rebuilt — ${data.contactCount} contacts`);
+        loadEvents();
+        setTimeout(() => setActionMsg(''), 5000);
+      }
+    } catch (_) {}
+    setRefreshingId(null);
   };
 
   const typeClass = {
@@ -1127,6 +1151,13 @@ function MarketPage({ token }) {
                         </>
                       ) : (
                         <>
+                          {refreshingId === ev.id ? (
+                            <span style={{ background: 'none', border: 'none', color: 'var(--text-muted)', padding: 2, display: 'flex', alignItems: 'center' }}>
+                              <RefreshCw size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                            </span>
+                          ) : (
+                            <button onClick={() => handleRefresh(ev)} title="Rebuild contact list" style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><RefreshCw size={12} /></button>
+                          )}
                           <button onClick={() => { setEditEvent(ev); setShowAddModal(true); }} title="Edit" style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><Pencil size={12} /></button>
                           <button onClick={() => setConfirmDeleteId(ev.id)} title="Delete" style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><Trash2 size={12} /></button>
                         </>

@@ -28,18 +28,22 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
-const CONTACTS_FILE = '/root/.openclaw/workspace/willoughby-contacts.json';
-const RP_DATA_FILE  = '/root/.openclaw/workspace/rp_data.csv';
-const COOLDOWN_FILE = '/root/.openclaw/workspace/recently-planned.json';
-const LOG_FILE      = '/root/.openclaw/workspace/daily-planner.log';
-const ALERTS_FILE   = '/root/.openclaw/workspace/listing-alerts.json';
-const DASHBOARD_DIR = '/root/.openclaw/workspace/dashboard';
+const CONTACTS_FILE  = '/root/.openclaw/workspace/willoughby-contacts.json';
+const RP_DATA_FILE   = '/root/.openclaw/workspace/rp_data.csv';
+const COOLDOWN_FILE  = '/root/.openclaw/workspace/recently-planned.json';
+const LOG_FILE       = '/root/.openclaw/workspace/daily-planner.log';
+const ALERTS_FILE    = '/root/.openclaw/workspace/listing-alerts.json';
+const GEO_CACHE_FILE = '/root/.openclaw/workspace/geo-cache.json';
+const DASHBOARD_DIR  = '/root/.openclaw/workspace/dashboard';
 
 // ─── In-memory cache (refreshed every hour) ───────────────────────────────────
-let _contactsMap = null;   // Map<id, contactObject>
-let _rpMap       = null;   // Map<"STREET SUBURB", rpEntry>
-let _cacheTs     = 0;
-const CACHE_TTL  = 60 * 60 * 1000; // 1 hour
+let _contactsMap    = null;   // Map<id, contactObject>           — AgentBox JSON (67k)
+let _rpMap          = null;   // Map<"STREET SUBURB", rpEntry>    — RP Data CSV
+let _geoCache       = null;   // Map<address_string, {lat,lon}>   — geo-cache.json
+let _sqlContactsMap = null;   // Map<id, contact>                 — SQLite contacts + pf_phone
+let _recentCallMap  = null;   // Map<contact_id, [{outcome, called_at}]> — last 90 days
+let _cacheTs        = 0;
+const CACHE_TTL     = 60 * 60 * 1000; // 1 hour
 
 function normalizeSuburb(suburb) {
   if (!suburb) return '';
@@ -93,13 +97,157 @@ function loadCache(force = false) {
   }
   _rpMap   = parseRPData();
   _cacheTs = Date.now();
-  console.log(`[cache] Ready — ${_contactsMap.size} contacts, ${_rpMap.size} RP entries.`);
+
+  // ── geo-cache ──────────────────────────────────────────────────────────────
+  _geoCache = new Map();
+  try {
+    if (fs.existsSync(GEO_CACHE_FILE)) {
+      const geoData = JSON.parse(fs.readFileSync(GEO_CACHE_FILE, 'utf8'));
+      for (const [k, v] of Object.entries(geoData)) _geoCache.set(k, v);
+    }
+  } catch (e) { console.warn('[cache] geo-cache load failed:', e.message); }
+
+  // ── SQL contacts (AgentBox + pricefinder, with phones) ─────────────────────
+  _sqlContactsMap = new Map();
+  try {
+    const sqlContacts = db.prepare(`
+      SELECT c.id, c.name, c.address, c.suburb, c.propensity_score, c.tenure_years,
+             c.beds, c.property_type,
+             COALESCE(c.mobile, p.pf_phone) AS effective_phone
+      FROM contacts c
+      LEFT JOIN properties p ON c.id = p.contact_id
+      WHERE (c.mobile IS NOT NULL OR p.pf_phone IS NOT NULL)
+        AND (c.do_not_call = 0 OR c.do_not_call IS NULL)
+        AND (p.do_not_call IS NULL OR p.do_not_call = 0)
+      GROUP BY c.id
+    `).all();
+    for (const c of sqlContacts) _sqlContactsMap.set(String(c.id), c);
+  } catch (e) { console.warn('[cache] SQL contacts load failed:', e.message); }
+
+  // ── recent call map (last 90 days) ──────────────────────────────────────────
+  _recentCallMap = new Map();
+  try {
+    const callRows = db.prepare(`
+      SELECT contact_id, outcome, called_at FROM call_log
+      WHERE called_at >= datetime('now', '-90 days')
+      ORDER BY called_at DESC
+    `).all();
+    for (const row of callRows) {
+      const id = String(row.contact_id);
+      if (!_recentCallMap.has(id)) _recentCallMap.set(id, []);
+      _recentCallMap.get(id).push({ outcome: row.outcome, called_at: row.called_at });
+    }
+  } catch (e) { console.warn('[cache] call log load failed:', e.message); }
+
+  console.log(`[cache] Ready — ${_contactsMap.size} AgentBox, ${_sqlContactsMap.size} SQL contacts, ${_rpMap.size} RP entries, ${_geoCache.size} geo entries.`);
 }
 
 // Warm cache on startup (non-fatal if data files are not yet present)
 try { loadCache(true); } catch (e) {
   console.warn('[cache] Warm failed (non-fatal):', e.message);
 }
+
+// ── Startup: dedup listing-alerts.json (fix pre-existing duplicate entries) ──
+try {
+  if (fs.existsSync(ALERTS_FILE)) {
+    let alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
+    const seen = new Set();
+    // Keep last occurrence of each street-part (reverse → filter → reverse)
+    alerts = alerts.slice().reverse().filter(a => {
+      const normStreetPart = (a.address || '').toUpperCase().split(',')[0].trim();
+      if (seen.has(normStreetPart)) return false;
+      seen.add(normStreetPart);
+      return true;
+    }).reverse();
+    fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
+    console.log('[startup] listing-alerts.json deduped');
+  }
+} catch (e) {
+  console.warn('[startup] alerts dedup failed (non-fatal):', e.message);
+}
+
+// ─── Geo utilities ────────────────────────────────────────────────────────────
+
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+const ORDINALS = { FIRST: 1, SECOND: 2, THIRD: 3, FOURTH: 4, FIFTH: 5, SIXTH: 6 };
+function extractOrdinal(streetKeyword) {
+  return ORDINALS[(streetKeyword || '').toUpperCase()] || null;
+}
+
+async function geocodeAddress(streetPart, suburb) {
+  if (!_geoCache) return null;
+  if (_geoCache.has(streetPart)) return _geoCache.get(streetPart);
+  const withSuburb = suburb ? `${streetPart}, ${suburb}` : null;
+  if (withSuburb && _geoCache.has(withSuburb)) return _geoCache.get(withSuburb);
+
+  const query = `${streetPart}${suburb ? ', ' + suburb : ''}, NSW, Australia`;
+  try {
+    await new Promise(r => setTimeout(r, 1100)); // Nominatim rate limit
+    const resp = await axios.get('https://nominatim.openstreetmap.org/search', {
+      params: { q: query, format: 'json', limit: 1 },
+      headers: { 'User-Agent': 'JarvisRE/1.0' },
+      timeout: 8000,
+    });
+    if (resp.data && resp.data[0]) {
+      const result = { lat: parseFloat(resp.data[0].lat), lon: parseFloat(resp.data[0].lon) };
+      _geoCache.set(streetPart, result);
+      try {
+        const geoObj = Object.fromEntries(_geoCache);
+        fs.writeFileSync(GEO_CACHE_FILE, JSON.stringify(geoObj, null, 2));
+      } catch (_) {}
+      return result;
+    }
+  } catch (e) {
+    console.warn('[geocode] Nominatim error for "' + streetPart + '":', e.message);
+  }
+  return null;
+}
+
+// ─── updateAlertsFileEntry helper ─────────────────────────────────────────────
+function updateAlertsFileEntry(address, topContacts) {
+  try {
+    if (!fs.existsSync(ALERTS_FILE)) return;
+    let alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
+    const normStreetPart = address.toUpperCase().split(',')[0].trim();
+    const idx = alerts.findIndex(a => a.address.toUpperCase().split(',')[0].trim() === normStreetPart);
+    if (idx >= 0) {
+      alerts[idx] = { ...alerts[idx], topContacts };
+      fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
+    }
+  } catch (e) {
+    console.warn('[updateAlertsFileEntry]', e.message);
+  }
+}
+
+// ── Startup: async rebuild of Manual event contacts from last 30 days ─────────
+setImmediate(async () => {
+  try {
+    const staleEvents = db.prepare(`
+      SELECT id, address, type, beds, property_type
+      FROM market_events WHERE source = 'Manual'
+      AND created_at >= datetime('now', '-30 days')
+    `).all();
+    for (const ev of staleEvents) {
+      const scored = await buildScoredContactsForManual(
+        ev.address, { propertyType: ev.property_type, beds: ev.beds }, 0
+      );
+      db.prepare('UPDATE market_events SET top_contacts = ? WHERE id = ?')
+        .run(JSON.stringify(scored), ev.id);
+      updateAlertsFileEntry(ev.address, scored);
+      console.log(`[startup] Rebuilt ${ev.address} → ${scored.length} contacts`);
+    }
+  } catch (e) {
+    console.warn('[startup] Manual event rebuild failed (non-fatal):', e.message);
+  }
+});
 
 // ─── Scoring helpers (mirrors daily-planner.js logic exactly) ─────────────────
 function calcScore(contact, rpEntry) {
@@ -326,12 +474,29 @@ app.post('/api/contacts/:id/called', requireAuth, (req, res) => {
 // GET /api/alerts — public (no auth), returns latest listing/sale alerts newest-first
 // Enriches each topContact with their most recent call_log outcome so the UI
 // can correctly show "already called" state after a page reload.
+// Also applies cross-event dedup: each contact only appears in the event where they score highest.
 app.get('/api/alerts', (req, res) => {
   try {
     if (!fs.existsSync(ALERTS_FILE)) return res.json([]);
-    const alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
+    let alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
 
-    // Collect all unique contact IDs across all alert topContacts
+    // ── Cross-event contact deduplication ─────────────────────────────────────
+    // Each contact ID appears in at most one event — the one where they score highest.
+    const bestEvent = new Map(); // contactId → { eventIdx, score }
+    alerts.forEach((ev, i) => {
+      (ev.topContacts || []).forEach(c => {
+        const existing = bestEvent.get(c.id);
+        if (!existing || (c.score || 0) > existing.score) {
+          bestEvent.set(c.id, { eventIdx: i, score: c.score || 0 });
+        }
+      });
+    });
+    alerts = alerts.map((ev, i) => ({
+      ...ev,
+      topContacts: (ev.topContacts || []).filter(c => (bestEvent.get(c.id) || {}).eventIdx === i)
+    }));
+
+    // ── Collect all unique contact IDs for outcome enrichment ─────────────────
     const contactIds = [];
     const seen = new Set();
     for (const alert of alerts) {
@@ -1062,83 +1227,175 @@ function categorizePropertyType(type) {
 
 /**
  * Build scored proximity contacts for a manual market event.
- * Uses the contacts already loaded in _contactsMap + _rpMap.
- * Progressive relaxation ladder: same category ±1bed → ±2bed → any bed → all types.
+ * Async: may geocode the event address via Nominatim if not in geo-cache.
+ * Single-pass scoring: propensity + geo gradient + call bonus + comparable bonus.
+ * Returns up to 30 contacts sorted by total score. No minimum padding.
  */
-function buildScoredContactsForManual(address, details, minCount = 20) {
+async function buildScoredContactsForManual(address, details, minCount = 0) {
   loadCache();
   const listingCategory = categorizePropertyType(details.propertyType || 'House');
-  const listingBeds = details.beds ? parseInt(details.beds) : null;
+  const listingBeds     = details.beds ? parseInt(details.beds) : null;
 
-  // Normalize event address and extract the street name keyword for proximity ranking
-  // e.g. "15A Second Avenue, Willoughby East" → streetKeyword = "SECOND"
-  // e.g. "3/89 Penshurst Street"              → streetKeyword = "PENSHURST"
-  const normEventAddr = address.toUpperCase().replace(/\s+/g, ' ').trim();
+  // Extract street keyword from event address
+  // e.g. "15A SECOND AVENUE, WILLOUGHBY EAST" → "SECOND"
+  const normEventAddr   = address.toUpperCase().replace(/\s+/g, ' ').trim();
   const eventStreetPart = normEventAddr.split(',')[0].trim();
-  const streetKeyword = (() => {
-    let s = eventStreetPart
-      .replace(/^[\d]+[A-Z]?\s*\/\s*[\d]+[A-Z]?\s+/, '') // "3/89 " unit prefix
-      .replace(/^[\d]+[A-Z]?\s+/, '');                     // "15A " or "22 " number prefix
-    // Strip trailing street type (STREET, AVE, etc.)
+  function extractStreetKeyword(addrPart) {
+    let s = addrPart
+      .replace(/^[\d]+[A-Z]?\s*\/\s*[\d]+[A-Z]?\s+/, '') // unit prefix "3/89 "
+      .replace(/^[\d]+[A-Z]?\s+/, '');                     // number prefix "15A "
     s = s.replace(/\s+(STREET|ST|AVENUE|AVE|ROAD|RD|DRIVE|DR|LANE|LN|PLACE|PL|CLOSE|CL|CRESCENT|CRES|COURT|CT|PARADE|PDE|TERRACE|TCE|WAY|GROVE|GR|BOULEVARD|BLVD)(\s.*)?$/i, '').trim();
     const parts = s.split(/\s+/);
     return parts[parts.length - 1] || '';
-  })();
+  }
+  const streetKeyword  = extractStreetKeyword(eventStreetPart);
+  const eventOrdinal   = extractOrdinal(streetKeyword);
 
-  const LOCAL_SUBURBS = ['WILLOUGHBY', 'NORTH WILLOUGHBY', 'WILLOUGHBY EAST',
-                         'CHATSWOOD', 'ARTARMON', 'NAREMBURN', 'CASTLE COVE', 'MIDDLE COVE'];
+  // Extract suburb from event address
+  const eventAddrParts = normEventAddr.split(',');
+  const eventSuburb    = eventAddrParts.length > 1 ? eventAddrParts[eventAddrParts.length - 1].trim() : 'WILLOUGHBY';
 
-  // Build candidate pool: all contacts in local suburbs, excluding the event property itself
-  const candidates = [];
+  // Geocode the event address
+  const eventGeo = await geocodeAddress(eventStreetPart, eventSuburb);
+
+  const LOCAL_SUBURBS = new Set(['WILLOUGHBY', 'NORTH WILLOUGHBY', 'WILLOUGHBY EAST',
+    'CHATSWOOD', 'ARTARMON', 'NAREMBURN', 'CASTLE COVE', 'MIDDLE COVE', 'CASTLECRAG']);
+
+  // ── Build candidate pool ──────────────────────────────────────────────────
+  // Primary: _sqlContactsMap (CRM + pricefinder contacts with phones, ~3k)
+  const candidateMap = new Map();
+
+  for (const [id, c] of (_sqlContactsMap || new Map())) {
+    const cSuburb = (c.suburb || '').toUpperCase().trim();
+    if (!LOCAL_SUBURBS.has(cSuburb)) continue;
+    if (!c.effective_phone) continue;
+    const contactAddrNorm = (c.address || '').toUpperCase().replace(/\s+/g, ' ').trim();
+    const contactStreetPart = contactAddrNorm.split(',')[0].trim();
+    // Exclude vendor (exact street-part match including number)
+    if (eventStreetPart && contactStreetPart && eventStreetPart === contactStreetPart) continue;
+    candidateMap.set(id, {
+      id,
+      name:         c.name || 'Unknown',
+      address:      c.address || '',
+      suburb:       c.suburb  || '',
+      phone:        c.effective_phone,
+      propensity:   c.propensity_score || 0,
+      beds:         c.beds != null ? parseInt(c.beds) : null,
+      propertyType: c.property_type || '',
+    });
+  }
+
+  // Secondary: AgentBox-only contacts not already in candidateMap
   for (const [id, contact] of (_contactsMap || new Map())) {
+    if (candidateMap.has(id)) continue;
     if (!contact.mobile) continue;
     const cSuburb = normalizeSuburb(contact.suburb || '');
-    if (!LOCAL_SUBURBS.includes(cSuburb)) continue;
-    // Exclude the vendor — contact lives at the property being sold/listed
-    const contactAddrNorm = (contact.address || '').toUpperCase().replace(/\s+/g, ' ').trim();
+    if (!LOCAL_SUBURBS.has(cSuburb) && !LOCAL_SUBURBS.has((contact.suburb || '').toUpperCase().trim())) continue;
+    const contactAddrNorm   = (contact.address || '').toUpperCase().replace(/\s+/g, ' ').trim();
     const contactStreetPart = contactAddrNorm.split(',')[0].trim();
     if (eventStreetPart && contactStreetPart && eventStreetPart === contactStreetPart) continue;
     const rpKey   = `${contactAddrNorm} ${cSuburb}`.trim();
     const rpEntry = _rpMap?.get(rpKey);
-    const score   = calcScore(contact, rpEntry);
-    // Proximity bonus: contacts on the same street rank first
+    candidateMap.set(id, {
+      id,
+      name:         contact.name || 'Unknown',
+      address:      contact.address || '',
+      suburb:       contact.suburb  || '',
+      phone:        contact.mobile,
+      propensity:   calcScore(contact, rpEntry),
+      beds:         rpEntry?.['Bed'] ? parseInt(rpEntry['Bed']) : null,
+      propertyType: rpEntry?.['Property Type'] || contact.propertyType || '',
+    });
+  }
+
+  // ── Score each candidate ───────────────────────────────────────────────────
+  const now    = Date.now();
+  const scored = [];
+
+  for (const [id, cand] of candidateMap) {
+    const contactAddrNorm = (cand.address || '').toUpperCase().replace(/\s+/g, ' ').trim();
+    const contactStrPart  = contactAddrNorm.split(',')[0].trim();
+
+    // ── geo_score ────────────────────────────────────────────────────────────
+    let geoScore = 15; // same suburb floor
+
     const onSameStreet = streetKeyword.length >= 3 && contactAddrNorm.includes(streetKeyword);
-    candidates.push({ id, contact, rpEntry, score, onSameStreet });
+    if (onSameStreet) {
+      geoScore = 1000;
+    } else {
+      // Try Haversine if both are geocoded
+      const contactGeo = (() => {
+        const bareAddr = contactStrPart;
+        if (_geoCache.has(bareAddr)) return _geoCache.get(bareAddr);
+        const withSub = cand.suburb ? `${bareAddr}, ${cand.suburb}` : null;
+        if (withSub && _geoCache.has(withSub)) return _geoCache.get(withSub);
+        return null;
+      })();
+
+      if (eventGeo && contactGeo) {
+        const dist = haversine(eventGeo.lat, eventGeo.lon, contactGeo.lat, contactGeo.lon);
+        if      (dist <= 150)  geoScore = 800;
+        else if (dist <= 350)  geoScore = 500;
+        else if (dist <= 700)  geoScore = 250;
+        else if (dist <= 1300) geoScore = 80;
+        else                   geoScore = 15;
+      } else if (eventOrdinal !== null) {
+        // Ordinal avenue heuristic (First/Second/Third/Fourth Ave)
+        const contactKeyword = extractStreetKeyword(contactStrPart);
+        const contactOrdinal = extractOrdinal(contactKeyword);
+        if (contactOrdinal !== null) {
+          const diff = Math.abs(eventOrdinal - contactOrdinal);
+          if      (diff === 1) geoScore = Math.max(geoScore, 500);
+          else if (diff === 2) geoScore = Math.max(geoScore, 200);
+        }
+      }
+    }
+
+    // ── call_bonus ────────────────────────────────────────────────────────────
+    let callBonus = 0;
+    const calls   = _recentCallMap?.get(id) || [];
+    for (const c of calls) {
+      const ageDays = (now - new Date(c.called_at).getTime()) / 86400000;
+      if (c.outcome === 'callback_requested') {
+        if (ageDays < 30)  { callBonus = Math.max(callBonus, 200); break; }
+        if (ageDays < 90)  { callBonus = Math.max(callBonus, 100); }
+      } else {
+        if (ageDays < 30)  callBonus = Math.max(callBonus, 50);
+        else if (ageDays < 90) callBonus = Math.max(callBonus, 20);
+      }
+    }
+
+    // ── comparable_bonus (soft — no hard filter) ──────────────────────────────
+    let comparableBonus = 0;
+    if (cand.propertyType) {
+      if (categorizePropertyType(cand.propertyType) === listingCategory) comparableBonus += 40;
+    }
+    if (listingBeds !== null && cand.beds != null && cand.beds > 0) {
+      const diff = Math.abs(listingBeds - cand.beds);
+      if      (diff <= 1) comparableBonus += 25;
+      else if (diff <= 2) comparableBonus += 10;
+    }
+
+    const totalScore = cand.propensity + geoScore + callBonus + comparableBonus;
+    // Avoid duplicating suburb when it's already embedded in the address (pf_ contacts)
+    const addrStr = (() => {
+      const a = (cand.address || '').trim();
+      const s = (cand.suburb  || '').trim();
+      if (!s || a.toUpperCase().includes(s.toUpperCase())) return a;
+      return [a, s].filter(Boolean).join(', ');
+    })();
+    scored.push({
+      id,
+      name:     cand.name,
+      mobile:   cand.phone,
+      address:  addrStr,
+      distance: null,
+      score:    totalScore,
+    });
   }
 
-  function scoreWithFilter(bedTolerance, dropCategory) {
-    return candidates.map(({ id, contact, rpEntry, score, onSameStreet }) => {
-      if (!dropCategory) {
-        if (!rpEntry) return null;
-        const contactCat = categorizePropertyType(rpEntry['Property Type'] || '');
-        if (contactCat !== listingCategory) return null;
-      }
-      if (!dropCategory && bedTolerance !== null && listingBeds !== null && rpEntry) {
-        const contactBeds = parseInt(rpEntry['Bed'] || '0');
-        if (contactBeds > 0 && Math.abs(listingBeds - contactBeds) > bedTolerance) return null;
-      }
-      return {
-        id,
-        name:     contact.name    || 'Unknown',
-        mobile:   contact.mobile  || '',
-        address:  [contact.address, contact.suburb].filter(Boolean).join(', '),
-        distance: null,
-        score:    score + (onSameStreet ? 1000 : 0)
-      };
-    }).filter(Boolean).sort((a, b) => b.score - a.score);
-  }
-
-  const levels = [
-    () => scoreWithFilter(1, false),
-    () => scoreWithFilter(2, false),
-    () => scoreWithFilter(null, false),
-    () => scoreWithFilter(null, true),
-  ];
-  for (const level of levels) {
-    const scored = level();
-    if (scored.length >= minCount) return scored.slice(0, 30);
-  }
-  return scoreWithFilter(null, true).slice(0, 30);
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, 30);
 }
 
 // POST /api/log-call — log a call outcome for a Just Sold / Just Listed contact
@@ -1160,7 +1417,7 @@ app.post('/api/log-call', requireAuth, (req, res) => {
 });
 
 // POST /api/market-events/manual — manually inject a market event (dashboard + Telegram bot)
-app.post('/api/market-events/manual', requireAuth, (req, res) => {
+app.post('/api/market-events/manual', requireAuth, async (req, res) => {
   try {
     const { address, type, beds, baths, cars, property_type, price, suburb } = req.body;
     if (!address || !type) {
@@ -1181,7 +1438,6 @@ app.post('/api/market-events/manual', requireAuth, (req, res) => {
     const numMatch   = streetPart.match(/^(\d+)/);
     if (numMatch) {
       const num = numMatch[1];
-      // Strip leading number/unit and trailing street type to get the keyword
       const kw = streetPart
         .replace(/^[\d]+[A-Z]?\s*\/?\s*[\d]*[A-Z]?\s+/, '')
         .replace(/\s+(STREET|ST|AVENUE|AVE|ROAD|RD|DRIVE|DR|LANE|LN|PLACE|PL|CLOSE|CL|CRESCENT|CRES|COURT|CT|PARADE|PDE|TERRACE|TCE|WAY|GROVE|GR|BOULEVARD|BLVD)(\s.*)?$/i, '')
@@ -1194,15 +1450,16 @@ app.post('/api/market-events/manual', requireAuth, (req, res) => {
       }
     }
 
-    // 2. Build scored contacts
+    // 2. Build scored contacts (async — may geocode via Nominatim)
     const details = { propertyType: property_type || 'House', beds: beds || null };
-    const scoredContacts = buildScoredContactsForManual(normAddress, details, 20);
+    const scoredContacts = await buildScoredContactsForManual(normAddress, details, 0);
     const topContacts = scoredContacts.map(c => ({
       id:       c.id       || '',
       name:     c.name,
       mobile:   c.mobile   || '',
       address:  c.address  || '',
-      distance: c.distance ? Math.round(c.distance) : null
+      distance: c.distance ? Math.round(c.distance) : null,
+      score:    c.score    || 0,
     }));
 
     // 3. Insert into market_events (INSERT OR REPLACE logic: delete then insert)
@@ -1222,8 +1479,9 @@ app.post('/api/market-events/manual', requireAuth, (req, res) => {
            property_type || null, JSON.stringify(topContacts));
     const newEventId = insertResult.lastInsertRowid;
 
-    // 4. Rebuild listing-alerts.json entry for this address+type
+    // 4. Rebuild listing-alerts.json entry — street-part dedup to avoid duplicates
     try {
+      const normStreetPart = normAddress.split(',')[0].trim();
       const newEntry = {
         detectedAt:   new Date().toISOString(),
         type,
@@ -1234,14 +1492,15 @@ app.post('/api/market-events/manual', requireAuth, (req, res) => {
         cars:         cars         || '',
         propertyType: property_type || '',
         source:       'Manual',
-        topContacts
+        topContacts,
       };
       let alerts = [];
       if (fs.existsSync(ALERTS_FILE)) {
         try { alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8')); } catch (_) { alerts = []; }
       }
-      const idx = alerts.findIndex(a => a.address === normAddress && a.type === type);
-      if (idx >= 0) alerts[idx] = newEntry; else alerts.push(newEntry);
+      // Strip any existing entry with the same street part (handles address-format variants)
+      alerts = alerts.filter(a => a.address.toUpperCase().split(',')[0].trim() !== normStreetPart);
+      alerts.push(newEntry);
       alerts = alerts.slice(-20);
       fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
     } catch (e) {
@@ -1257,7 +1516,7 @@ app.post('/api/market-events/manual', requireAuth, (req, res) => {
 });
 
 // PATCH /api/market-events/:id — edit an existing market event
-app.patch('/api/market-events/:id', requireAuth, (req, res) => {
+app.patch('/api/market-events/:id', requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     if (!id) return res.status(400).json({ error: 'invalid id' });
@@ -1296,13 +1555,14 @@ app.patch('/api/market-events/:id', requireAuth, (req, res) => {
       }
     }
 
-    // Rebuild contacts if address or property type changed
+    // Rebuild contacts if address, property type, or beds changed (or explicit refresh with no body fields)
     let topContacts;
-    if (address || property_type || beds) {
-      const details = { propertyType: property_type || existing.property_type || 'House', beds: beds || existing.beds || null };
-      const scored = buildScoredContactsForManual(normAddress, details, 20);
+    if (address || property_type || beds !== undefined) {
+      const details = { propertyType: property_type || existing.property_type || 'House', beds: beds !== undefined ? beds : existing.beds };
+      const scored = await buildScoredContactsForManual(normAddress, details, 0);
       topContacts = scored.map(c => ({
-        id: c.id || '', name: c.name, mobile: c.mobile || '', address: c.address || '', distance: null
+        id: c.id || '', name: c.name, mobile: c.mobile || '', address: c.address || '',
+        distance: null, score: c.score || 0,
       }));
     } else {
       topContacts = existing.top_contacts ? JSON.parse(existing.top_contacts) : [];
