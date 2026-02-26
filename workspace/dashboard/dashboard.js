@@ -9,7 +9,8 @@ const {
   Phone, ChevronDown, ChevronUp, Bell, TrendingUp, Users, Clock,
   MapPin, Calendar, Check, X, AlertCircle, Home, Activity,
   MessageSquare, PhoneCall, PhoneOff, PhoneMissed, Star, RefreshCw,
-  History, Menu, Building2, CheckCircle
+  History, Menu, Building2, CheckCircle, Bed, Bath, Car, Plus, Mail,
+  Search
 } = LucideReact;
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -156,6 +157,15 @@ function StatusStrip({ status, planCount, calledCount }) {
   const remaining = Math.max(0, planCount - calledCount);
   const pct = planCount > 0 ? Math.round((calledCount / planCount) * 100) : 0;
 
+  // Email scan freshness pill
+  let emailColor = 'var(--text-muted)';
+  let emailLabel = '—';
+  if (status?.lastEmailScan) {
+    const minAgo = Math.floor((Date.now() - new Date(status.lastEmailScan)) / 60000);
+    emailLabel = minAgo < 2 ? 'just now' : minAgo < 60 ? `${minAgo}m ago` : `${Math.floor(minAgo/60)}h ago`;
+    emailColor = minAgo < 20 ? '#22c55e' : minAgo < 60 ? '#f59e0b' : '#f87171';
+  }
+
   return (
     <div className="status-strip">
       <div className="stat-chip">
@@ -176,6 +186,14 @@ function StatusStrip({ status, planCount, calledCount }) {
       <div className="stat-chip">
         <span className="stat-value" style={{ fontSize: 13 }}>{status ? timeAgo(status.lastRun) : '—'}</span>
         <span className="stat-label">Last Run</span>
+      </div>
+      <div className="stat-divider" />
+      <div className="stat-chip" title="Last email scan">
+        <span className="stat-value" style={{ fontSize: 12, color: emailColor, display: 'flex', alignItems: 'center', gap: 3 }}>
+          <Mail size={10} style={{ color: emailColor }} />
+          {emailLabel}
+        </span>
+        <span className="stat-label">Email Scan</span>
       </div>
       <div className="progress-bar-wrap">
         <div className="progress-label">{pct}% complete</div>
@@ -484,8 +502,187 @@ function TierSection({ tier, contacts, token, onLogged, activeContactId, default
   );
 }
 
+// ── Prospect Card (Just Sold / Just Listed contacts) ───────────────────────
+function ProspectCard({ contact, onLogged, token }) {
+  const [localOutcome, setLocalOutcome] = useState(null);
+  const [logging, setLogging] = useState(false);
+  const [showFollowUp, setShowFollowUp] = useState(false);
+  const [followUpDays, setFollowUpDays] = useState(1);
+  const [followUpNote, setFollowUpNote] = useState('');
+  const [savingFollowUp, setSavingFollowUp] = useState(false);
+
+  const logCall = useCallback(async (outcome) => {
+    setLogging(true);
+    try {
+      const body = { contact_id: contact.id || contact.name, outcome };
+      if (contact.id) {
+        await apiFetch('/api/log-call', token, {
+          method: 'POST',
+          body: JSON.stringify(body)
+        });
+      }
+      setLocalOutcome(outcome);
+      if (outcome === 'callback_requested' || outcome === 'connected' || outcome === 'left_message') {
+        setShowFollowUp(true);
+        setFollowUpDays(outcome === 'left_message' ? 2 : 1);
+      }
+      if (onLogged) onLogged(contact.id || contact.name, outcome);
+    } catch (err) { console.error('log-call failed', err); }
+    finally { setLogging(false); }
+  }, [contact, token, onLogged]);
+
+  const saveFollowUp = useCallback(async () => {
+    setSavingFollowUp(true);
+    try {
+      const d = new Date();
+      d.setDate(d.getDate() + followUpDays);
+      d.setHours(9, 0, 0, 0);
+      await apiFetch('/api/reminders', token, {
+        method: 'POST',
+        body: JSON.stringify({
+          contact_id: contact.id,
+          contact_name: contact.name,
+          contact_mobile: contact.mobile,
+          note: followUpNote || `Follow up — ${OUTCOME_LABELS[localOutcome] || localOutcome}`,
+          fire_at: d.toISOString()
+        })
+      });
+      setShowFollowUp(false);
+    } catch (err) { console.error('save follow-up failed', err); }
+    finally { setSavingFollowUp(false); }
+  }, [contact, token, followUpNote, followUpDays, localOutcome]);
+
+  const isDimmed = !!localOutcome;
+
+  return (
+    <div className={`prospect-card${isDimmed ? ' prospect-card--called' : ''}`}>
+      <div className="prospect-card-top">
+        <div className="prospect-card-name">{contact.name}</div>
+        <div className="prospect-card-right">
+          {contact.distance != null && (
+            <span className="prospect-dist">{contact.distance}m</span>
+          )}
+          {contact.mobile && (
+            <a className="prospect-tel" href={`tel:${contact.mobile}`}>
+              <Phone size={11} />{contact.mobile}
+            </a>
+          )}
+        </div>
+      </div>
+      {contact.address && (
+        <div className="prospect-addr">{contact.address}</div>
+      )}
+      {localOutcome ? (
+        <div className="prospect-logged">
+          <Check size={10} />
+          <span>{OUTCOME_LABELS[localOutcome] || localOutcome}</span>
+          <button className="prospect-relog" onClick={() => { setLocalOutcome(null); setShowFollowUp(false); }}>Re-log</button>
+        </div>
+      ) : (
+        <div className="prospect-quick-btns">
+          <button className="pq-btn pq-connected" onClick={() => logCall('connected')} disabled={logging}>Connected</button>
+          <button className="pq-btn pq-message" onClick={() => logCall('left_message')} disabled={logging}>Left Message</button>
+          <button className="pq-btn pq-noanswer" onClick={() => logCall('no_answer')} disabled={logging}>Not Home</button>
+          <button className="pq-btn pq-notint" onClick={() => logCall('not_interested')} disabled={logging}>Not Interested</button>
+          <button className="pq-btn pq-callback" onClick={() => logCall('callback_requested')} disabled={logging}>Callback</button>
+        </div>
+      )}
+      {showFollowUp && (
+        <div className="followup-prompt">
+          <div className="followup-label">Follow up in:</div>
+          <div className="followup-row">
+            {[[1,'Tomorrow'], [2,'2 Days'], [7,'1 Week']].map(([days, label]) => (
+              <button
+                key={days}
+                className={`followup-quick${followUpDays === days ? ' active' : ''}`}
+                onClick={() => setFollowUpDays(days)}
+              >{label}</button>
+            ))}
+          </div>
+          <input
+            className="followup-note-input"
+            type="text"
+            placeholder="Note (optional)..."
+            value={followUpNote}
+            onChange={e => setFollowUpNote(e.target.value)}
+          />
+          <div className="followup-actions">
+            <button className="followup-skip" onClick={() => setShowFollowUp(false)}>Skip</button>
+            <button className="followup-save" onClick={saveFollowUp} disabled={savingFollowUp}>
+              {savingFollowUp ? 'Saving…' : 'Save Follow-up'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Event Group (collapsible group within Just Sold / Just Listed) ──────────
+function EventGroup({ alert, token, accentColor, defaultExpanded }) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const [showMore, setShowMore] = useState(false);
+  const [calledMap, setCalledMap] = useState({});
+
+  const contacts = alert.topContacts || [];
+  const initialCount = Math.min(10, contacts.length);
+  const visibleContacts = showMore ? contacts : contacts.slice(0, initialCount);
+  const calledCount = Object.keys(calledMap).length;
+
+  const handleLogged = useCallback((id, outcome) => {
+    setCalledMap(prev => ({ ...prev, [id]: outcome }));
+  }, []);
+
+  const ageDays = Math.floor((Date.now() - new Date(alert.detectedAt)) / 86400000);
+  const ageLabel = ageDays === 0 ? 'TODAY' : ageDays === 1 ? '1 DAY AGO' : `${ageDays} DAYS AGO`;
+
+  const propParts = [
+    alert.beds && `${alert.beds}bed`,
+    alert.propertyType
+  ].filter(Boolean).join(' · ');
+
+  return (
+    <div className="event-group" style={{ '--group-accent': accentColor }}>
+      <div className="event-group-header" onClick={() => setExpanded(e => !e)}>
+        <div className="event-group-meta-row">
+          <span className="event-group-age" style={{ color: accentColor }}>{ageLabel}</span>
+          {calledCount > 0 && (
+            <span className="event-group-progress">{calledCount}/{contacts.length} called</span>
+          )}
+          <ChevronDown size={13} style={{ marginLeft: 'auto', transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', color: 'var(--text-muted)', flexShrink: 0 }} />
+        </div>
+        <div className="event-group-addr">{alert.address}</div>
+        <div className="event-group-detail">
+          {propParts && <span>{propParts}</span>}
+          {alert.price && <span style={{ color: accentColor, marginLeft: 6 }}>{alert.price}</span>}
+        </div>
+      </div>
+      {expanded && (
+        <div className="event-group-cards">
+          {visibleContacts.map((c, i) => (
+            <ProspectCard
+              key={c.id || c.name || i}
+              contact={c}
+              token={token}
+              onLogged={handleLogged}
+            />
+          ))}
+          {!showMore && contacts.length > initialCount && (
+            <button className="show-more-btn" onClick={e => { e.stopPropagation(); setShowMore(true); }}>
+              Show {contacts.length - initialCount} more ↓
+            </button>
+          )}
+          {contacts.length === 0 && (
+            <div className="prospect-empty">No contacts logged for this event</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Calls Page ─────────────────────────────────────────────────────────────
-function CallsPage({ token }) {
+function CallsPage({ token, onReminderCountChange }) {
   const [plan, setPlan] = useState([]);
   const planRef = useRef([]);
   const [alerts, setAlerts] = useState([]);
@@ -494,76 +691,76 @@ function CallsPage({ token }) {
   const [activeContactId, setActiveContactId] = useState(null);
   const [calledOpen, setCalledOpen] = useState(false);
   const [topping, setTopping] = useState(false);
+  const [mobileCol, setMobileCol] = useState('circle'); // 'circle' | 'sold' | 'listed'
+  const [reminders, setReminders] = useState([]);
 
-  // Keep ref in sync so handleLogged always reads current plan without stale closure
   useEffect(() => { planRef.current = plan; }, [plan]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [planRes, alertsRes, statusRes] = await Promise.all([
+      const [planRes, alertsRes, statusRes, remindersRes] = await Promise.all([
         apiFetch('/api/plan/today', token),
         fetch('/api/alerts'),
-        fetch('/api/status')
+        fetch('/api/status'),
+        apiFetch('/api/reminders/upcoming', token)
       ]);
       if (planRes.ok) {
         const data = await planRes.json();
         setPlan(data);
-        // Set first uncalled as active
         const firstUncalled = data.find(d => !d.called_at);
-        if (firstUncalled) {
-          setActiveContactId(firstUncalled.contact_id || firstUncalled.id);
-        }
+        if (firstUncalled) setActiveContactId(firstUncalled.contact_id || firstUncalled.id);
       }
       if (alertsRes.ok) setAlerts(await alertsRes.json());
       if (statusRes.ok) setStatus(await statusRes.json());
-    } catch (err) {
-      console.error('Load failed', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [token]);
+      if (remindersRes.ok) {
+        const rems = await remindersRes.json();
+        setReminders(Array.isArray(rems) ? rems : []);
+        if (onReminderCountChange) onReminderCountChange(Array.isArray(rems) ? rems.length : 0);
+      }
+    } catch (err) { console.error('Load failed', err); }
+    finally { setLoading(false); }
+  }, [token, onReminderCountChange]);
 
   const handleTopUp = useCallback(async (n = 10) => {
     setTopping(true);
     try {
       const res = await apiFetch(`/api/plan/topup?n=${n}`, token, { method: 'POST' });
       if (res.ok) await loadData();
-    } catch (err) {
-      console.error('Top up failed', err);
-    } finally {
-      setTopping(false);
-    }
+    } catch (err) { console.error('Top up failed', err); }
+    finally { setTopping(false); }
   }, [token, loadData]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
   const handleLogged = useCallback(() => {
-    // Read current plan from ref to avoid stale closure
     const currentPlan = planRef.current;
     const uncalled = currentPlan.filter(d => !d.called_at);
     const currentIdx = uncalled.findIndex(d => (d.contact_id || d.id) === activeContactId);
     const nextUncalled = uncalled.filter((_, i) => i !== currentIdx);
-    // Mark current as called
     setPlan(prev => prev.map(d =>
       (d.contact_id || d.id) === activeContactId
-        ? { ...d, called_at: new Date().toISOString() }
-        : d
+        ? { ...d, called_at: new Date().toISOString() } : d
     ));
-    // Advance to next uncalled
     if (nextUncalled.length > 0) {
       const next = nextUncalled[Math.min(currentIdx, nextUncalled.length - 1)];
       setActiveContactId(next.contact_id || next.id);
-    } else {
-      setActiveContactId(null);
-    }
+    } else { setActiveContactId(null); }
   }, [activeContactId]);
 
   const uncalled = plan.filter(d => !d.called_at);
-  const called = plan.filter(d => !!d.called_at);
-  const high = uncalled.filter(d => getScore(d) >= 45);
-  const med  = uncalled.filter(d => { const s = getScore(d); return s >= 20 && s < 45; });
-  const low  = uncalled.filter(d => getScore(d) < 20);
+  const called   = plan.filter(d => !!d.called_at);
+  const high     = uncalled.filter(d => getScore(d) >= 45);
+  const med      = uncalled.filter(d => { const s = getScore(d); return s >= 20 && s < 45; });
+  const low      = uncalled.filter(d => getScore(d) < 20);
+
+  const now = Date.now();
+  const CUTOFF_DAYS = 14;
+  const soldAlerts   = alerts.filter(a => a.type === 'sold'    && (now - new Date(a.detectedAt)) / 86400000 <= CUTOFF_DAYS).sort((a, b) => new Date(b.detectedAt) - new Date(a.detectedAt));
+  const listedAlerts = alerts.filter(a => a.type === 'listing' && (now - new Date(a.detectedAt)) / 86400000 <= CUTOFF_DAYS).sort((a, b) => new Date(b.detectedAt) - new Date(a.detectedAt));
+
+  const endOfToday = new Date(); endOfToday.setHours(23, 59, 59, 999);
+  const dueToday = reminders.filter(r => r.fire_at && new Date(r.fire_at) <= endOfToday);
 
   if (loading) {
     return (
@@ -574,71 +771,241 @@ function CallsPage({ token }) {
     );
   }
 
-  return (
-    <>
-      <StatusStrip status={status} planCount={plan.length} calledCount={called.length} />
-      <AlertBanner alerts={alerts} />
-      <div className="page-body">
+  // ── Column 1: Circle Prospecting ─────────────────────────────────────────
+  const circleColumn = (
+    <div className="call-col">
+      <div className="call-col-header call-col-header--gold">
+        <span className="call-col-title">CIRCLE PROSPECTING</span>
+        <span className="call-col-badge">{uncalled.length}</span>
+      </div>
+      <div className="call-col-body">
+        {dueToday.length > 0 && (
+          <div className="due-today-section">
+            <div className="due-today-header">
+              <Bell size={11} style={{ color: 'var(--gold)' }} />
+              <span>Due Today ({dueToday.length})</span>
+            </div>
+            {dueToday.map(r => (
+              <div className="due-today-card" key={r.id}>
+                <div className="due-today-name">{r.contact_name}</div>
+                <div className="due-today-note">{r.note}</div>
+                {r.contact_mobile && (
+                  <a className="prospect-tel" href={`tel:${r.contact_mobile}`} style={{ marginTop: 4, display: 'inline-flex' }}>
+                    <Phone size={10} />{r.contact_mobile}
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         <TierSection tier="high" contacts={high} token={token} onLogged={handleLogged} activeContactId={activeContactId} defaultOpen={true} />
-        <TierSection tier="med" contacts={med} token={token} onLogged={handleLogged} activeContactId={activeContactId} defaultOpen={true} />
-        <TierSection tier="low" contacts={low} token={token} onLogged={handleLogged} activeContactId={activeContactId} defaultOpen={false} />
-
-        {/* Called Today Section */}
+        <TierSection tier="med"  contacts={med}  token={token} onLogged={handleLogged} activeContactId={activeContactId} defaultOpen={true} />
+        <TierSection tier="low"  contacts={low}  token={token} onLogged={handleLogged} activeContactId={activeContactId} defaultOpen={false} />
         {called.length > 0 && (
           <div className="tier-section">
             <div className="tier-header tier-low" onClick={() => setCalledOpen(o => !o)}>
               <CheckCircle size={8} style={{ color: 'var(--tier-high)', flexShrink: 0 }} />
               <span className="tier-label" style={{ color: 'var(--text-muted)' }}>Called Today</span>
               <span className="tier-count">({called.length})</span>
-              <span className={`tier-chevron${calledOpen ? ' open' : ''}`}>
-                <ChevronDown size={14} />
-              </span>
+              <span className={`tier-chevron${calledOpen ? ' open' : ''}`}><ChevronDown size={14} /></span>
             </div>
             {calledOpen && (
               <div className="tier-cards">
                 {called.map((c, i) => (
-                  <ContactCard
-                    key={c.id || c.contact_id || i}
-                    contact={c}
-                    token={token}
-                    onLogged={handleLogged}
-                    autoExpand={false}
-                    index={i}
-                  />
+                  <ContactCard key={c.id || c.contact_id || i} contact={c} token={token} onLogged={handleLogged} autoExpand={false} index={i} />
                 ))}
               </div>
             )}
           </div>
         )}
-
-        {/* Top Up button — always visible, disabled while loading */}
-        <div style={{ display: 'flex', justifyContent: 'center', padding: '4px 0 20px', gap: 8 }}>
-          <button
-            className="topup-btn"
-            onClick={() => handleTopUp(10)}
-            disabled={topping}
-          >
-            {topping ? 'Fetching…' : '+ Top Up 10 contacts'}
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '8px 0 20px', gap: 6 }}>
+          <button className="topup-btn" onClick={() => handleTopUp(10)} disabled={topping}>
+            {topping ? 'Fetching…' : '+ Top Up 10'}
           </button>
-          <button
-            className="topup-btn topup-btn--sm"
-            onClick={() => handleTopUp(5)}
-            disabled={topping}
-            title="Add 5 contacts"
-          >
-            +5
-          </button>
+          <button className="topup-btn topup-btn--sm" onClick={() => handleTopUp(5)} disabled={topping}>+5</button>
         </div>
-
         {plan.length === 0 && (
           <div className="empty-state">
-            <div className="empty-state-icon"><Calendar size={32} /></div>
-            <div className="empty-state-title">No contacts planned today</div>
-            <div className="empty-state-sub">Run daily-planner.js or tap Top Up above</div>
+            <div className="empty-state-icon"><Calendar size={28} /></div>
+            <div className="empty-state-title">No contacts planned</div>
+            <div className="empty-state-sub">Run daily-planner.js or tap Top Up</div>
           </div>
         )}
       </div>
+    </div>
+  );
+
+  // ── Column 2: Just Sold ───────────────────────────────────────────────────
+  const soldColumn = (
+    <div className="call-col">
+      <div className="call-col-header call-col-header--green">
+        <span className="call-col-title">JUST SOLD</span>
+        <span className="call-col-badge call-col-badge--green">{soldAlerts.length}</span>
+      </div>
+      <div className="call-col-body">
+        {soldAlerts.length === 0 ? (
+          <div className="empty-state">
+            <div className="empty-state-icon" style={{ color: '#22c55e' }}><Activity size={28} /></div>
+            <div className="empty-state-title">No recent sales detected</div>
+            <div className="empty-state-sub">Sales within 14 days will appear here</div>
+          </div>
+        ) : (
+          soldAlerts.map((alert, i) => (
+            <EventGroup
+              key={alert.address + alert.detectedAt}
+              alert={alert}
+              token={token}
+              accentColor="#22c55e"
+              defaultExpanded={i === 0}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+
+  // ── Column 3: Just Listed ─────────────────────────────────────────────────
+  const listedColumn = (
+    <div className="call-col">
+      <div className="call-col-header call-col-header--blue">
+        <span className="call-col-title">JUST LISTED</span>
+        <span className="call-col-badge call-col-badge--blue">{listedAlerts.length}</span>
+      </div>
+      <div className="call-col-body">
+        {listedAlerts.length === 0 ? (
+          <div className="empty-state">
+            <div className="empty-state-icon" style={{ color: '#3b82f6' }}><Home size={28} /></div>
+            <div className="empty-state-title">No new listings in area</div>
+            <div className="empty-state-sub">New listings within 14 days appear here</div>
+          </div>
+        ) : (
+          listedAlerts.map((alert, i) => (
+            <EventGroup
+              key={alert.address + alert.detectedAt}
+              alert={alert}
+              token={token}
+              accentColor="#3b82f6"
+              defaultExpanded={i === 0}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      <StatusStrip status={status} planCount={plan.length} calledCount={called.length} />
+
+      {/* Mobile column tabs */}
+      <div className="call-col-tabs">
+        <button className={`call-col-tab${mobileCol === 'circle' ? ' active' : ''}`} onClick={() => setMobileCol('circle')}>
+          CIRCLE <span className="call-col-tab-badge">{uncalled.length}</span>
+        </button>
+        <button className={`call-col-tab call-col-tab--green${mobileCol === 'sold' ? ' active' : ''}`} onClick={() => setMobileCol('sold')}>
+          SOLD <span className="call-col-tab-badge">{soldAlerts.length}</span>
+        </button>
+        <button className={`call-col-tab call-col-tab--blue${mobileCol === 'listed' ? ' active' : ''}`} onClick={() => setMobileCol('listed')}>
+          LISTED <span className="call-col-tab-badge">{listedAlerts.length}</span>
+        </button>
+      </div>
+
+      {/* Desktop: three columns. Mobile: one column based on tab */}
+      <div className="call-board">
+        <div className={`call-col-wrap${mobileCol === 'circle' ? ' mobile-visible' : ' mobile-hidden'}`}>
+          {circleColumn}
+        </div>
+        <div className={`call-col-wrap${mobileCol === 'sold' ? ' mobile-visible' : ' mobile-hidden'}`}>
+          {soldColumn}
+        </div>
+        <div className={`call-col-wrap${mobileCol === 'listed' ? ' mobile-visible' : ' mobile-hidden'}`}>
+          {listedColumn}
+        </div>
+      </div>
     </>
+  );
+}
+
+// ── Add Market Event Modal ──────────────────────────────────────────────────
+function AddEventModal({ token, onClose, onAdded }) {
+  const [form, setForm] = useState({ address: '', type: 'sold', beds: '', baths: '', cars: '', property_type: 'House', price: '' });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const handleSubmit = async () => {
+    if (!form.address) { setError('Address is required'); return; }
+    setSaving(true);
+    setError('');
+    try {
+      const res = await apiFetch('/api/market-events/manual', token, {
+        method: 'POST',
+        body: JSON.stringify(form)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        onAdded(data.contactCount);
+        onClose();
+      } else {
+        const err = await res.json();
+        setError(err.error || 'Failed to add event');
+      }
+    } catch (e) { setError('Network error'); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal-box">
+        <div className="modal-title">Add Market Event</div>
+
+        <label className="form-label">Address *</label>
+        <input className="form-input" type="text" placeholder="3/89 Penshurst Street, North Willoughby" value={form.address} onChange={e => set('address', e.target.value)} />
+
+        <label className="form-label">Type</label>
+        <select className="form-input" value={form.type} onChange={e => set('type', e.target.value)}>
+          <option value="sold">Sold</option>
+          <option value="listing">Listing</option>
+          <option value="price_change">Price Change</option>
+        </select>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+          <div>
+            <label className="form-label">Beds</label>
+            <input className="form-input" type="number" min="0" max="10" placeholder="2" value={form.beds} onChange={e => set('beds', e.target.value)} />
+          </div>
+          <div>
+            <label className="form-label">Baths</label>
+            <input className="form-input" type="number" min="0" max="10" placeholder="1" value={form.baths} onChange={e => set('baths', e.target.value)} />
+          </div>
+          <div>
+            <label className="form-label">Cars</label>
+            <input className="form-input" type="number" min="0" max="10" placeholder="1" value={form.cars} onChange={e => set('cars', e.target.value)} />
+          </div>
+        </div>
+
+        <label className="form-label">Property Type</label>
+        <select className="form-input" value={form.property_type} onChange={e => set('property_type', e.target.value)}>
+          <option value="House">House</option>
+          <option value="Unit">Unit</option>
+          <option value="Townhouse">Townhouse</option>
+          <option value="Apartment">Apartment</option>
+        </select>
+
+        <label className="form-label">Price</label>
+        <input className="form-input" type="text" placeholder="$1,250,000 or Undisclosed" value={form.price} onChange={e => set('price', e.target.value)} />
+
+        {error && <div style={{ color: '#f87171', fontSize: 12, marginTop: 8 }}>{error}</div>}
+
+        <div className="modal-actions">
+          <button className="modal-btn-cancel" onClick={onClose}>Cancel</button>
+          <button className="modal-btn-save" onClick={handleSubmit} disabled={saving}>
+            {saving ? 'Adding…' : 'Add Event'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -646,13 +1013,24 @@ function CallsPage({ token }) {
 function MarketPage({ token }) {
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [addedMsg, setAddedMsg] = useState('');
 
-  useEffect(() => {
+  const loadEvents = useCallback(() => {
+    setLoading(true);
     apiFetch('/api/market?days=14', token)
       .then(r => r.ok ? r.json() : [])
       .then(data => { setEvents(Array.isArray(data) ? data : []); setLoading(false); })
       .catch(() => setLoading(false));
   }, [token]);
+
+  useEffect(() => { loadEvents(); }, [loadEvents]);
+
+  const handleAdded = (contactCount) => {
+    setAddedMsg(`✅ Event added — ${contactCount} contacts flagged`);
+    loadEvents();
+    setTimeout(() => setAddedMsg(''), 5000);
+  };
 
   const typeClass = {
     listing: 'type-listing',
@@ -665,11 +1043,25 @@ function MarketPage({ token }) {
 
   return (
     <div className="page-body">
+      {/* Header row with Add Event button */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        {addedMsg && (
+          <span style={{ marginRight: 'auto', color: '#22c55e', fontSize: 12, fontFamily: 'var(--font-mono)' }}>{addedMsg}</span>
+        )}
+        <button
+          className="topup-btn"
+          style={{ fontSize: 11, padding: '6px 14px', gap: 5, display: 'flex', alignItems: 'center' }}
+          onClick={() => setShowAddModal(true)}
+        >
+          <Plus size={12} /> Add Event
+        </button>
+      </div>
+
       {events.length === 0 ? (
         <div className="empty-state">
           <div className="empty-state-icon"><TrendingUp size={32} /></div>
           <div className="empty-state-title">No market events</div>
-          <div className="empty-state-sub">Check back after the next pipeline run</div>
+          <div className="empty-state-sub">Check back after the next pipeline run, or add one manually above</div>
         </div>
       ) : (
         <div className="event-list">
@@ -681,14 +1073,19 @@ function MarketPage({ token }) {
               <div className="event-body">
                 <div className="event-addr">{ev.address || '—'}</div>
                 <div className="event-detail">
-                  {[ev.suburb, ev.beds && `${ev.beds}bd`, ev.baths && `${ev.baths}ba`, ev.price || ev.listing_price]
+                  {[ev.suburb, ev.beds && `${ev.beds}bd`, ev.baths && `${ev.baths}ba`,
+                    ev.property_type, ev.price || ev.listing_price]
                     .filter(Boolean).join(' · ')}
                 </div>
               </div>
-              <div className="event-meta">{timeAgo(ev.created_at || ev.event_date)}</div>
+              <div className="event-meta">{timeAgo(ev.detected_at || ev.event_date)}</div>
             </div>
           ))}
         </div>
+      )}
+
+      {showAddModal && (
+        <AddEventModal token={token} onClose={() => setShowAddModal(false)} onAdded={handleAdded} />
       )}
     </div>
   );
@@ -696,24 +1093,26 @@ function MarketPage({ token }) {
 
 // ── Buyers Page ────────────────────────────────────────────────────────────
 function BuyersPage({ token }) {
-  const [grouped, setGrouped] = useState({});
+  const [data, setData] = useState({ active: {}, archived: {} });
   const [loading, setLoading] = useState(true);
-  const [outcomeTarget, setOutcomeTarget] = useState(null); // buyer id
+  const [sort, setSort] = useState('newest');
+  const [group, setGroup] = useState('listing');
+  const [expandedListings, setExpandedListings] = useState({});
+  const [showArchived, setShowArchived] = useState(false);
+  const [outcomeTarget, setOutcomeTarget] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const syncPollRef = useRef(null);
 
   const loadBuyers = useCallback(async () => {
-    const res = await apiFetch('/api/buyers/calllist', token);
-    if (res.ok) setGrouped(await res.json());
-  }, [token]);
+    const res = await apiFetch(`/api/buyers/calllist?sort=${sort}&group=${group}`, token);
+    if (res.ok) setData(await res.json());
+  }, [token, sort, group]);
 
   useEffect(() => {
-    apiFetch('/api/buyers/calllist', token)
-      .then(r => r.ok ? r.json() : {})
-      .then(data => { setGrouped(data || {}); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [token]);
+    setLoading(true);
+    loadBuyers().finally(() => setLoading(false));
+  }, [sort, group, token]);
 
   // Poll sync status while running
   useEffect(() => {
@@ -740,6 +1139,8 @@ function BuyersPage({ token }) {
     await apiFetch('/api/buyers/sync', token, { method: 'POST' });
   };
 
+  const toggleExpand = (addr) => setExpandedListings(prev => ({ ...prev, [addr]: !prev[addr] }));
+
   const logBuyerOutcome = async (buyerId, outcome) => {
     try {
       await apiFetch(`/api/buyers/${buyerId}/outcome`, token, {
@@ -754,85 +1155,204 @@ function BuyersPage({ token }) {
   const markDone = async (buyerId, address) => {
     try {
       await apiFetch(`/api/buyers/${buyerId}/done`, token, { method: 'PATCH' });
-      setGrouped(prev => {
-        const updated = { ...prev };
-        if (updated[address]) {
-          updated[address] = updated[address].filter(b => b.id !== buyerId);
-          if (updated[address].length === 0) delete updated[address];
-        }
-        return updated;
-      });
+      await loadBuyers();
     } catch (err) { console.error(err); }
   };
 
   if (loading) return <div className="loading-state"><div className="spinner" /></div>;
 
-  const addresses = Object.keys(grouped);
+  const activeEntries = Object.entries(data.active || {});
 
   return (
     <div className="page-body">
       <div className="buyers-toolbar">
-        <button className="topup-btn" onClick={handleSync} disabled={syncing}>
+        <div className="buyers-control-group">
+          <span className="buyers-control-label">SORT</span>
+          <div className="buyers-toggle">
+            <button className={`buyers-toggle-btn ${sort === 'newest' ? 'active' : ''}`} onClick={() => setSort('newest')}>Newest</button>
+            <button className={`buyers-toggle-btn ${sort === 'oldest' ? 'active' : ''}`} onClick={() => setSort('oldest')}>Oldest</button>
+          </div>
+        </div>
+        <div className="buyers-control-group">
+          <span className="buyers-control-label">GROUP BY</span>
+          <div className="buyers-toggle">
+            <button className={`buyers-toggle-btn ${group === 'listing' ? 'active' : ''}`} onClick={() => setGroup('listing')}>Listing</button>
+            <button className={`buyers-toggle-btn ${group === 'type' ? 'active' : ''}`} onClick={() => setGroup('type')}>Type</button>
+          </div>
+        </div>
+        <button className="topup-btn" onClick={handleSync} disabled={syncing} style={{ marginLeft: 'auto' }}>
           {syncing ? 'Syncing…' : '↻ Sync from AgentBox'}
         </button>
         {syncMsg && <span className="sync-msg">{syncMsg}</span>}
       </div>
-      {addresses.length === 0 ? (
-        <div className="empty-state">
-          <div className="empty-state-icon"><Users size={32} /></div>
-          <div className="empty-state-title">No active buyer enquiries</div>
-          <div className="empty-state-sub">Press "Sync from AgentBox" to pull the latest enquiries</div>
-        </div>
-      ) : (
-        addresses.map(addr => (
-          <div className="listing-group" key={addr}>
-            <div className="listing-group-header">
-              <MapPin size={13} style={{ color: 'var(--gold)', flexShrink: 0 }} />
-              <span className="listing-group-addr">{addr}</span>
-              <span className="listing-group-count">{grouped[addr].length} buyer{grouped[addr].length !== 1 ? 's' : ''}</span>
-            </div>
-            {grouped[addr].map(buyer => (
-              <div className="buyer-row" key={buyer.id}>
-                <div className="buyer-name">{buyer.buyer_name || buyer.name || 'Unknown'}</div>
-                {(buyer.buyer_mobile || buyer.mobile) && (
-                  <a className="buyer-mobile" href={`tel:${buyer.buyer_mobile || buyer.mobile}`}>
-                    <Phone size={11} style={{ marginRight: 3, verticalAlign: 'middle' }} />
-                    {buyer.buyer_mobile || buyer.mobile}
-                  </a>
-                )}
-                {buyer.enquiry_type && (
-                  <span className="buyer-type-badge">{buyer.enquiry_type}</span>
-                )}
-                {outcomeTarget === buyer.id ? (
-                  <div className="buyer-actions">
-                    {['interested', 'not_interested', 'no_answer', 'left_message', 'appointment_booked'].map(o => (
-                      <button
-                        key={o}
-                        className="icon-btn"
-                        style={{ fontSize: 9, padding: '2px 6px' }}
-                        onClick={() => logBuyerOutcome(buyer.id, o)}
-                      >
-                        {o.replace(/_/g, ' ')}
-                      </button>
-                    ))}
-                    <button className="icon-btn danger" onClick={() => setOutcomeTarget(null)}>
-                      <X size={12} />
-                    </button>
-                  </div>
-                ) : (
-                  <div className="buyer-actions">
-                    <button className="icon-btn" title="Log outcome" onClick={() => setOutcomeTarget(buyer.id)}>
-                      <PhoneCall size={13} />
-                    </button>
-                    <button className="icon-btn danger" title="Mark done" onClick={() => markDone(buyer.id, addr)}>
-                      <Check size={13} />
-                    </button>
-                  </div>
-                )}
-              </div>
-            ))}
+
+      {group === 'listing' ? (
+        activeEntries.length === 0 ? (
+          <div className="empty-state">
+            <div className="empty-state-icon"><Users size={32} /></div>
+            <div className="empty-state-title">No active buyer enquiries</div>
+            <div className="empty-state-sub">Press "Sync from AgentBox" to pull the latest enquiries</div>
           </div>
-        ))
+        ) : (
+          activeEntries.map(([addr, groupData]) => {
+            const buyers = groupData.buyers || [];
+            const listing = groupData.listing || {};
+            return (
+              <div className="listing-group" key={addr}>
+                <div className="listing-group-header" onClick={() => toggleExpand(addr)}>
+                  <MapPin size={13} style={{ color: 'var(--gold)', flexShrink: 0 }} />
+                  <span className="listing-group-addr">{addr}</span>
+                  <span className="listing-group-count">{buyers.length} buyer{buyers.length !== 1 ? 's' : ''}</span>
+                  <div className="listing-group-meta">
+                    {listing.beds && <span className="listing-meta-chip"><Bed size={10}/> {listing.beds}</span>}
+                    {listing.baths && <span className="listing-meta-chip"><Bath size={10}/> {listing.baths}</span>}
+                    {listing.cars && <span className="listing-meta-chip"><Car size={10}/> {listing.cars}</span>}
+                    {listing.price_guide && <span className="listing-price-chip">{listing.price_guide}</span>}
+                  </div>
+                  {expandedListings[addr] ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                </div>
+                {expandedListings[addr] && (
+                  <div className="listing-detail-panel">
+                    {listing.headline && <div className="listing-detail-headline">{listing.headline}</div>}
+                    <div className="listing-detail-stats">
+                      {listing.land_area && <div className="listing-stat"><span className="listing-stat-label">LAND</span><span>{listing.land_area}</span></div>}
+                      {listing.building_area && <div className="listing-stat"><span className="listing-stat-label">BUILDING</span><span>{listing.building_area}</span></div>}
+                      {listing.method && <div className="listing-stat"><span className="listing-stat-label">METHOD</span><span>{listing.method}</span></div>}
+                      {listing.auction_date && <div className="listing-stat"><span className="listing-stat-label">AUCTION</span><span>{new Date(listing.auction_date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>}
+                      {listing.council_rates && <div className="listing-stat"><span className="listing-stat-label">COUNCIL</span><span>${listing.council_rates}</span></div>}
+                      {listing.water_rates && <div className="listing-stat"><span className="listing-stat-label">WATER</span><span>${listing.water_rates}</span></div>}
+                      {listing.strata_total && listing.strata_total !== '0 / quarter' && <div className="listing-stat"><span className="listing-stat-label">STRATA</span><span>${listing.strata_total}</span></div>}
+                    </div>
+                    {listing.description && (
+                      <div className="listing-detail-desc">{listing.description}</div>
+                    )}
+                    {listing.web_link && (
+                      <a className="listing-detail-link" href={listing.web_link} target="_blank" rel="noopener noreferrer">View on McGrath →</a>
+                    )}
+                  </div>
+                )}
+                {buyers.map(buyer => (
+                  <div className="buyer-row" key={buyer.id}>
+                    <div className="buyer-row-main">
+                      <div className="buyer-name">{buyer.buyer_name || 'Unknown'}</div>
+                      <div className="buyer-row-meta">
+                        {buyer.enquiry_date && (
+                          <span className="buyer-date">
+                            <Calendar size={9} style={{ marginRight: 3, verticalAlign: 'middle' }} />
+                            {new Date(buyer.enquiry_date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}
+                          </span>
+                        )}
+                        {buyer.enquiry_type && (
+                          <span className={`buyer-type-badge buyer-type-${buyer.enquiry_type}`}>{buyer.enquiry_type.replace(/_/g, ' ')}</span>
+                        )}
+                      </div>
+                    </div>
+                    {(buyer.buyer_mobile || buyer.mobile) && (
+                      <a className="buyer-mobile" href={`tel:${buyer.buyer_mobile || buyer.mobile}`}>
+                        <Phone size={11} style={{ marginRight: 3, verticalAlign: 'middle' }} />
+                        {buyer.buyer_mobile || buyer.mobile}
+                      </a>
+                    )}
+                    {outcomeTarget === buyer.id ? (
+                      <div className="buyer-actions">
+                        {['interested', 'not_interested', 'no_answer', 'left_message', 'appointment_booked'].map(o => (
+                          <button key={o} className="icon-btn" style={{ fontSize: 9, padding: '2px 6px' }} onClick={() => logBuyerOutcome(buyer.id, o)}>
+                            {o.replace(/_/g, ' ')}
+                          </button>
+                        ))}
+                        <button className="icon-btn danger" onClick={() => setOutcomeTarget(null)}><X size={12} /></button>
+                      </div>
+                    ) : (
+                      <div className="buyer-actions">
+                        <button className="icon-btn" title="Log outcome" onClick={() => setOutcomeTarget(buyer.id)}><PhoneCall size={13} /></button>
+                        <button className="icon-btn danger" title="Mark done" onClick={() => markDone(buyer.id, addr)}><Check size={13} /></button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            );
+          })
+        )
+      ) : (
+        /* group === 'type' view */
+        ['inspection', 'online_enquiry', 'callback', 'other'].map(type => {
+          const buyers = data.active[type] || [];
+          if (!buyers.length) return null;
+          return (
+            <div className="type-group" key={type}>
+              <div className="type-group-header">
+                <span className={`type-group-badge buyer-type-badge buyer-type-${type}`}>{type.replace(/_/g, ' ')}</span>
+                <span className="listing-group-count">{buyers.length} buyer{buyers.length !== 1 ? 's' : ''}</span>
+              </div>
+              {buyers.map(buyer => (
+                <div className="buyer-row" key={buyer.id}>
+                  <div className="buyer-row-main">
+                    <div className="buyer-name">{buyer.buyer_name || 'Unknown'}</div>
+                    <div className="buyer-row-meta">
+                      <span className="buyer-listing-ref">{buyer.listing_address}</span>
+                      {buyer.enquiry_date && <span className="buyer-date"><Calendar size={9}/> {new Date(buyer.enquiry_date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })}</span>}
+                    </div>
+                  </div>
+                  {(buyer.buyer_mobile || buyer.mobile) && (
+                    <a className="buyer-mobile" href={`tel:${buyer.buyer_mobile || buyer.mobile}`}><Phone size={11}/> {buyer.buyer_mobile || buyer.mobile}</a>
+                  )}
+                  <div className="buyer-actions">
+                    <button className="icon-btn" title="Log outcome" onClick={() => setOutcomeTarget(buyer.id)}><PhoneCall size={13} /></button>
+                    <button className="icon-btn danger" title="Mark done" onClick={() => markDone(buyer.id, buyer.listing_address || '')}><Check size={13} /></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })
+      )}
+
+      {Object.keys(data.archived || {}).length > 0 && (
+        <div className="archived-section">
+          <button className="archived-toggle" onClick={() => setShowArchived(v => !v)}>
+            {showArchived ? <ChevronUp size={13}/> : <ChevronDown size={13}/>}
+            <span>Archived Listings</span>
+            <span className="listing-group-count">{Object.values(data.archived).reduce((n, g) => n + (g.buyers || g).length, 0)} buyer{Object.values(data.archived).reduce((n, g) => n + (g.buyers || g).length, 0) !== 1 ? 's' : ''} across {Object.keys(data.archived).length} listing{Object.keys(data.archived).length !== 1 ? 's' : ''}</span>
+          </button>
+          {showArchived && (
+            <div className="archived-content">
+              {Object.entries(data.archived).map(([addr, groupData]) => {
+                const buyers = group === 'listing' ? groupData.buyers || [] : [];
+                const listing = group === 'listing' ? groupData.listing || {} : {};
+                return (
+                  <div className="listing-group archived-listing" key={addr}>
+                    <div className="listing-group-header" onClick={() => toggleExpand('archived_' + addr)}>
+                      <MapPin size={13} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                      <span className="listing-group-addr" style={{ color: 'var(--text-muted)' }}>{addr}</span>
+                      <span className="listing-group-count">{buyers.length} buyer{buyers.length !== 1 ? 's' : ''}</span>
+                      <span className="archived-status-badge">WITHDRAWN</span>
+                    </div>
+                    {expandedListings['archived_' + addr] && listing.headline && (
+                      <div className="listing-detail-panel" style={{ opacity: 0.7 }}>
+                        <div className="listing-detail-headline">{listing.headline}</div>
+                      </div>
+                    )}
+                    {buyers.map(buyer => (
+                      <div className="buyer-row" key={buyer.id} style={{ opacity: 0.6 }}>
+                        <div className="buyer-row-main">
+                          <div className="buyer-name">{buyer.buyer_name || 'Unknown'}</div>
+                          <div className="buyer-row-meta">
+                            {buyer.enquiry_date && <span className="buyer-date"><Calendar size={9}/> {new Date(buyer.enquiry_date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
+                            {buyer.enquiry_type && <span className={`buyer-type-badge buyer-type-${buyer.enquiry_type}`}>{buyer.enquiry_type.replace(/_/g, ' ')}</span>}
+                          </div>
+                        </div>
+                        {(buyer.buyer_mobile || buyer.mobile) && (
+                          <a className="buyer-mobile" href={`tel:${buyer.buyer_mobile || buyer.mobile}`}><Phone size={11}/> {buyer.buyer_mobile || buyer.mobile}</a>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -956,8 +1476,324 @@ function HistoryPage({ token }) {
   );
 }
 
+// ── Search Card ────────────────────────────────────────────────────────────
+function SearchCard({ prop, token, onAddedToPlan }) {
+  const [addState, setAddState] = useState(null); // null | 'adding' | 'added' | 'already'
+  const [showOutcome, setShowOutcome] = useState(false);
+  const [logging, setLogging] = useState(false);
+  const [loggedOutcome, setLoggedOutcome] = useState(null);
+
+  const contactId = prop.crm_contact_id;
+  const displayName = prop.crm_name || prop.owner_name || 'Unknown Owner';
+  const phone = prop.contact_mobile;
+
+  const handleAddToPlan = useCallback(async () => {
+    if (!contactId) return;
+    setAddState('adding');
+    try {
+      const res = await apiFetch('/api/plan/add', token, {
+        method: 'POST',
+        body: JSON.stringify({ contact_id: contactId })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAddState(data.added ? 'added' : 'already');
+        if (onAddedToPlan) onAddedToPlan(prop.property_id);
+      }
+    } catch (err) { setAddState(null); }
+  }, [contactId, token, prop.property_id, onAddedToPlan]);
+
+  const logOutcome = useCallback(async (outcome) => {
+    if (!contactId) return;
+    setLogging(true);
+    try {
+      await apiFetch('/api/log-call', token, {
+        method: 'POST',
+        body: JSON.stringify({ contact_id: contactId, outcome })
+      });
+      setLoggedOutcome(outcome);
+      setShowOutcome(false);
+    } catch (err) { console.error('Log failed', err); }
+    finally { setLogging(false); }
+  }, [contactId, token]);
+
+  const scoreColor = prop.propensity_score >= 45 ? 'var(--tier-high)' : prop.propensity_score >= 20 ? 'var(--tier-med)' : 'var(--text-muted)';
+
+  return (
+    <div className={`search-card${prop.do_not_call ? ' search-card--dnc' : ''}`}>
+      {/* Property line */}
+      <div className="search-card-prop-row">
+        <span className="search-card-address">{prop.address}</span>
+        <div className="search-card-chips">
+          {(prop.beds || prop.baths) && (
+            <span className="search-chip search-chip--prop">
+              {[prop.beds && `${prop.beds}bd`, prop.baths && `${prop.baths}ba`].filter(Boolean).join(' ')}
+            </span>
+          )}
+          {prop.property_type && (
+            <span className={`search-chip search-chip--type search-chip--${(prop.property_type || '').toLowerCase()}`}>
+              {prop.property_type}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Owner line */}
+      <div className="search-card-owner-row">
+        <span className="search-card-owner">{displayName}</span>
+        {prop.do_not_call ? (
+          <span className="search-chip search-chip--dnc">DNCR</span>
+        ) : phone ? (
+          <a className="search-card-phone" href={`tel:${phone}`}>
+            <Phone size={10} />{phone}
+          </a>
+        ) : null}
+        {prop.propensity_score > 0 && (
+          <span className="search-chip search-chip--score" style={{ color: scoreColor, borderColor: scoreColor }}>
+            {fmtScore(prop.propensity_score)}
+          </span>
+        )}
+      </div>
+
+      {/* Market line */}
+      {(prop.valuation_amount || prop.last_sale_price || prop.last_sale_date) && (
+        <div className="search-card-market-row">
+          {prop.valuation_amount && <span className="search-card-val">{prop.valuation_amount}</span>}
+          {prop.last_sale_price && <span className="search-card-sale">{prop.last_sale_price}</span>}
+          {prop.last_sale_date && <span className="search-card-saledate">{prop.last_sale_date.slice(0, 7)}</span>}
+        </div>
+      )}
+
+      {/* Action row */}
+      <div className="search-card-actions">
+        {phone && !prop.do_not_call && (
+          <a className="search-action-btn search-action--call" href={`tel:${phone}`}>
+            <Phone size={10} /> Call
+          </a>
+        )}
+        {contactId && (
+          <button
+            className={`search-action-btn search-action--plan${addState === 'added' ? ' added' : addState === 'already' ? ' already' : ''}`}
+            onClick={handleAddToPlan}
+            disabled={addState === 'adding' || addState === 'added' || addState === 'already'}
+          >
+            <Plus size={10} />
+            {addState === 'added' ? 'Added!' : addState === 'already' ? 'In Plan' : addState === 'adding' ? '…' : 'Add to Plan'}
+          </button>
+        )}
+        {contactId && (
+          loggedOutcome ? (
+            <span className={`outcome-chip chip-${loggedOutcome}`} style={{ fontSize: 9 }}>
+              {OUTCOME_LABELS[loggedOutcome] || loggedOutcome}
+            </span>
+          ) : (
+            <button
+              className="search-action-btn search-action--outcome"
+              onClick={() => setShowOutcome(o => !o)}
+            >
+              <PhoneCall size={10} /> Log Outcome
+            </button>
+          )
+        )}
+      </div>
+
+      {/* Inline outcome quick-log */}
+      {showOutcome && (
+        <div className="search-card-outcome-grid">
+          {['connected', 'left_message', 'no_answer', 'not_interested', 'callback_requested', 'appraisal_booked'].map(o => (
+            <button
+              key={o}
+              className={`quick-btn ${o.replace(/_/g, '')}`}
+              style={{ fontSize: 9, padding: '3px 6px' }}
+              onClick={() => logOutcome(o)}
+              disabled={logging}
+            >
+              {OUTCOME_LABELS[o] || o}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Search Page ─────────────────────────────────────────────────────────────
+function SearchPage({ token }) {
+  const [form, setForm] = useState({
+    street: '', suburb: 'all', type: 'all',
+    beds_min: '', beds_max: '', owner: '', show_dnc: false
+  });
+  const [results, setResults] = useState([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [totalPages, setTotalPages] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [searched, setSearched] = useState(false);
+
+  const set = useCallback((k, v) => setForm(f => ({ ...f, [k]: v })), []);
+
+  const search = useCallback(async (p = 1) => {
+    setLoading(true);
+    const params = new URLSearchParams();
+    if (form.street)                     params.set('street',   form.street);
+    if (form.suburb && form.suburb !== 'all') params.set('suburb', form.suburb);
+    if (form.type   && form.type   !== 'all') params.set('type',   form.type);
+    if (form.beds_min) params.set('beds_min', form.beds_min);
+    if (form.beds_max) params.set('beds_max', form.beds_max);
+    if (form.owner)    params.set('owner',    form.owner);
+    if (form.show_dnc) params.set('show_dnc', '1');
+    params.set('page', p);
+    try {
+      const res = await apiFetch(`/api/search?${params}`, token);
+      if (res.ok) {
+        const data = await res.json();
+        setResults(data.results || []);
+        setTotalCount(data.total_count || 0);
+        setTotalPages(data.total_pages || 0);
+        setPage(p);
+        setSearched(true);
+      }
+    } catch (err) { console.error('Search failed', err); }
+    finally { setLoading(false); }
+  }, [form, token]);
+
+  const handleKeyDown = useCallback((e) => {
+    if (e.key === 'Enter') search(1);
+  }, [search]);
+
+  const pageStart = (page - 1) * 50 + 1;
+  const pageEnd   = Math.min(page * 50, totalCount);
+
+  return (
+    <div className="page-body search-page">
+      {/* Search form */}
+      <div className="search-form">
+        <div className="search-form-row">
+          <div className="search-field">
+            <label className="search-field-label">Street</label>
+            <input
+              className="search-input"
+              type="text"
+              placeholder="e.g. penshurst"
+              value={form.street}
+              onChange={e => set('street', e.target.value)}
+              onKeyDown={handleKeyDown}
+            />
+          </div>
+          <div className="search-field">
+            <label className="search-field-label">Suburb</label>
+            <select className="search-input" value={form.suburb} onChange={e => set('suburb', e.target.value)}>
+              <option value="all">All Suburbs</option>
+              <option value="willoughby east">Willoughby East</option>
+              <option value="north willoughby">North Willoughby</option>
+              <option value="willoughby">Willoughby</option>
+            </select>
+          </div>
+          <div className="search-field">
+            <label className="search-field-label">Type</label>
+            <select className="search-input" value={form.type} onChange={e => set('type', e.target.value)}>
+              <option value="all">All Types</option>
+              <option value="house">House</option>
+              <option value="unit">Unit</option>
+              <option value="townhouse">Townhouse</option>
+            </select>
+          </div>
+        </div>
+        <div className="search-form-row">
+          <div className="search-field search-field--narrow">
+            <label className="search-field-label">Beds Min</label>
+            <select className="search-input" value={form.beds_min} onChange={e => set('beds_min', e.target.value)}>
+              <option value="">Any</option>
+              {[1,2,3,4,5].map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </div>
+          <div className="search-field search-field--narrow">
+            <label className="search-field-label">Beds Max</label>
+            <select className="search-input" value={form.beds_max} onChange={e => set('beds_max', e.target.value)}>
+              <option value="">Any</option>
+              {[1,2,3,4,5].map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </div>
+          <div className="search-field">
+            <label className="search-field-label">Owner</label>
+            <input
+              className="search-input"
+              type="text"
+              placeholder="Surname..."
+              value={form.owner}
+              onChange={e => set('owner', e.target.value)}
+              onKeyDown={handleKeyDown}
+            />
+          </div>
+          <div className="search-field search-field--check">
+            <label className="search-check-label">
+              <input type="checkbox" checked={form.show_dnc} onChange={e => set('show_dnc', e.target.checked)} />
+              Show DNCR
+            </label>
+          </div>
+          <button className="search-btn" onClick={() => search(1)} disabled={loading}>
+            <Search size={13} />
+            {loading ? 'Searching…' : 'Search'}
+          </button>
+        </div>
+      </div>
+
+      {/* Results header */}
+      {searched && !loading && (
+        <div className="search-results-header">
+          {totalCount === 0 ? (
+            <span>No properties found</span>
+          ) : (
+            <>
+              <span>Found <strong>{totalCount}</strong> properties</span>
+              {totalCount > 50 && <span> · Showing {pageStart}–{pageEnd}</span>}
+            </>
+          )}
+          {totalPages > 1 && (
+            <div className="search-pagination">
+              <button className="search-page-btn" disabled={page <= 1} onClick={() => search(page - 1)}>‹</button>
+              <span>{page} / {totalPages}</span>
+              <button className="search-page-btn" disabled={page >= totalPages} onClick={() => search(page + 1)}>›</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Loading state */}
+      {loading && <div className="loading-state"><div className="spinner" /></div>}
+
+      {/* Results */}
+      {!loading && results.length > 0 && (
+        <div className="search-results">
+          {results.map((prop, i) => (
+            <SearchCard key={prop.property_id || i} prop={prop} token={token} />
+          ))}
+        </div>
+      )}
+
+      {/* Empty state */}
+      {searched && !loading && results.length === 0 && (
+        <div className="empty-state">
+          <div className="empty-state-icon"><Search size={32} /></div>
+          <div className="empty-state-title">No properties found</div>
+          <div className="empty-state-sub">Try a different street name or filters</div>
+        </div>
+      )}
+
+      {/* Initial prompt */}
+      {!searched && !loading && (
+        <div className="empty-state" style={{ marginTop: 40 }}>
+          <div className="empty-state-icon" style={{ color: '#3b82f6' }}><Search size={32} /></div>
+          <div className="empty-state-title">Search 4,381 properties</div>
+          <div className="empty-state-sub">Filter by street, type, beds, or owner name</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Sidebar ────────────────────────────────────────────────────────────────
-function Sidebar({ page, onNav, remainingCount, mobileOpen }) {
+function Sidebar({ page, onNav, remainingCount, reminderCount, mobileOpen }) {
   const today = new Date().toLocaleDateString('en-AU', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
   });
@@ -966,7 +1802,8 @@ function Sidebar({ page, onNav, remainingCount, mobileOpen }) {
     { id: 'calls', label: 'Calls', Icon: Phone, badge: remainingCount > 0 ? remainingCount : null },
     { id: 'market', label: 'Market', Icon: TrendingUp },
     { id: 'buyers', label: 'Buyers', Icon: Users },
-    { id: 'reminders', label: 'Reminders', Icon: Bell },
+    { id: 'reminders', label: 'Reminders', Icon: Bell, badge: reminderCount > 0 ? reminderCount : null },
+    { id: 'search', label: 'Search', Icon: Search },
     { id: 'history', label: 'History', Icon: History }
   ];
 
@@ -1004,6 +1841,7 @@ function MobileHeader({ page, onMenuClick }) {
     market: 'Market',
     buyers: 'Buyers',
     reminders: 'Reminders',
+    search: 'Search',
     history: 'History'
   };
   return (
@@ -1027,6 +1865,7 @@ function BottomTabBar({ page, onNav }) {
   const tabs = [
     { id: 'calls', label: 'Calls', Icon: Phone },
     { id: 'market', label: 'Market', Icon: TrendingUp },
+    { id: 'search', label: 'Search', Icon: Search },
     { id: 'buyers', label: 'Buyers', Icon: Users },
     { id: 'reminders', label: 'Remind', Icon: Bell },
     { id: 'history', label: 'History', Icon: History }
@@ -1055,6 +1894,7 @@ function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem('jarvis_token') || '');
   const [page, setPage] = useState('calls');
   const [remainingCount, setRemainingCount] = useState(0);
+  const [reminderCount, setReminderCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const handleLogin = useCallback((t) => {
@@ -1093,18 +1933,20 @@ function App() {
     market: { title: 'Market Events', subtitle: 'RECENT ACTIVITY — 14 DAYS' },
     buyers: { title: 'Buyer Enquiries', subtitle: 'ACTIVE CALL LIST' },
     reminders: { title: 'Reminders', subtitle: 'UPCOMING FOLLOW-UPS' },
+    search: { title: 'Property Search', subtitle: 'PRICEFINDER DATABASE — 4,381 PROPERTIES' },
     history: { title: 'Call History', subtitle: 'TODAY\'S LOGGED OUTCOMES' }
   };
   const pt = pageTitles[page] || pageTitles.calls;
 
   const renderPage = () => {
     switch (page) {
-      case 'calls':     return <CallsPage token={token} />;
+      case 'calls':     return <CallsPage token={token} onReminderCountChange={setReminderCount} />;
       case 'market':    return <MarketPage token={token} />;
       case 'buyers':    return <BuyersPage token={token} />;
       case 'reminders': return <RemindersPage token={token} />;
+      case 'search':    return <SearchPage token={token} />;
       case 'history':   return <HistoryPage token={token} />;
-      default:          return <CallsPage token={token} />;
+      default:          return <CallsPage token={token} onReminderCountChange={setReminderCount} />;
     }
   };
 
@@ -1117,6 +1959,7 @@ function App() {
         page={page}
         onNav={p => { handleNav(p); setSidebarOpen(false); }}
         remainingCount={remainingCount}
+        reminderCount={reminderCount}
         mobileOpen={sidebarOpen}
       />
       <main className="main-content">

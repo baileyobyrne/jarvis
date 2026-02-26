@@ -1,6 +1,7 @@
 # ─── Secrets & credentials ────────────────────────────────────────────────────
 .env
 auth-token.json
+auth-cache.json
 credentials/
 identity/
 telegram/
@@ -21,6 +22,14 @@ willoughby-contacts-full.csv
 willoughby-contacts.csv
 formatted-contacts.csv
 rp_data.csv
+
+# ─── Pricefinder CSVs (proprietary source data — imported into jarvis.db) ─────
+pricefinder/
+
+# ─── SQLite database (binary, regenerable from imports) ───────────────────────
+workspace/jarvis.db
+workspace/jarvis.db-wal
+workspace/jarvis.db-shm
 
 # ─── Runtime state files ──────────────────────────────────────────────────────
 recently-planned.json

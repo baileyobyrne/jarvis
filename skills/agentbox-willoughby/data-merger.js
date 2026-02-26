@@ -57,7 +57,8 @@ async function loadRPData() {
           rpMap.set(key, {
             lastSaleDate: row['Sale Date'],
             ownerType: row['Owner Type'],
-            propertyType: row['Property Type']
+            propertyType: row['Property Type'],
+            beds: row['Bed'] || null
           });
         }
       })

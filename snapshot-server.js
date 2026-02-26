@@ -175,6 +175,8 @@ function requireAuth(req, res, next) {
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 
+const MONITOR_LOG_FILE = '/root/.openclaw/workspace/monitor.log';
+
 // GET /api/status — public, used by dashboard header health indicator
 app.get('/api/status', (req, res) => {
   try {
@@ -189,9 +191,35 @@ app.get('/api/status', (req, res) => {
     if (fs.existsSync(LOG_FILE)) {
       lastRun = fs.statSync(LOG_FILE).mtime.toISOString();
     }
+    // Read last email scan time from monitor.log
+    let lastEmailScan = null;
+    try {
+      if (fs.existsSync(MONITOR_LOG_FILE)) {
+        const logContent = fs.readFileSync(MONITOR_LOG_FILE, 'utf8');
+        const lines = logContent.split('\n');
+        // Find the last line containing a timestamp at the start (ISO format)
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const line = lines[i].trim();
+          if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(line)) {
+            const isoMatch = line.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^\s]*)/);
+            if (isoMatch) { lastEmailScan = isoMatch[1]; break; }
+          }
+          // Also look for lines containing "Checking email" with surrounding timestamp
+          if (/Checking email/i.test(line)) {
+            const isoMatch = line.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^\s]*)/);
+            if (isoMatch) { lastEmailScan = isoMatch[1]; break; }
+          }
+        }
+        // If no inline timestamp found, use file mtime as fallback
+        if (!lastEmailScan) {
+          lastEmailScan = fs.statSync(MONITOR_LOG_FILE).mtime.toISOString();
+        }
+      }
+    } catch (_) { /* non-fatal */ }
     res.json({
       healthy:       true,
       lastRun,
+      lastEmailScan,
       totalContacts: _contactsMap?.size ?? 0,
       todayCount,
       calledCount,
@@ -564,13 +592,66 @@ app.get('/api/reminders/upcoming', requireAuth, (req, res) => {
 // GET /api/market
 app.get('/api/market', requireAuth, (req, res) => {
   try {
-    const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 365);
-    const rows = db.prepare(`
-      SELECT * FROM market_events
+    const days              = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 365);
+    const includeHistorical = req.query.include_historical === '1' || req.query.include_historical === 'true';
+
+    const liveRows = db.prepare(`
+      SELECT *, 'market_event' AS record_source FROM market_events
       WHERE detected_at >= datetime('now', '-' || ? || ' days')
       ORDER BY detected_at DESC LIMIT 100
     `).all(String(days));
-    res.json(rows);
+
+    if (!includeHistorical) {
+      return res.json(liveRows);
+    }
+
+    // Merge with historical_sales for the same date window
+    const histRows = db.prepare(`
+      SELECT
+        NULL AS id,
+        datetime(sale_date) AS detected_at,
+        sale_date           AS event_date,
+        'sold'              AS type,
+        address,
+        suburb,
+        sale_price          AS price,
+        NULL                AS price_previous,
+        0                   AS price_withheld,
+        NULL                AS proping_estimate,
+        NULL                AS estimate_delta,
+        days_on_market,
+        beds,
+        baths,
+        cars,
+        property_type,
+        agent_name,
+        agency,
+        'pricefinder_import' AS source,
+        0                   AS is_rental,
+        NULL                AS top_contacts,
+        created_at,
+        'historical_sale'   AS record_source
+      FROM historical_sales
+      WHERE sale_date >= date('now', '-' || ? || ' days')
+      ORDER BY sale_date DESC LIMIT 200
+    `).all(String(days));
+
+    // Merge and sort by detected_at desc, de-duplicate by address
+    const seen = new Set(liveRows.map(r => r.address));
+    const merged = [...liveRows];
+    for (const h of histRows) {
+      if (!seen.has(h.address)) {
+        merged.push(h);
+        seen.add(h.address);
+      }
+    }
+    merged.sort((a, b) => {
+      const ta = new Date(a.detected_at || a.event_date || 0).getTime();
+      const tb = new Date(b.detected_at || b.event_date || 0).getTime();
+      return tb - ta;
+    });
+
+    res.json(merged.slice(0, 200));
   } catch (e) {
     console.error('[GET /api/market]', e.message);
     res.status(500).json({ error: e.message });
@@ -694,23 +775,97 @@ app.get('/api/buyers', requireAuth, (req, res) => {
   }
 });
 
-// GET /api/buyers/calllist — active buyers not yet done, grouped by listing
+// GET /api/buyers/calllist — active buyers not yet done, grouped by listing or type
+// Query params: ?sort=newest|oldest (default: newest), ?group=listing|type (default: listing)
 app.get('/api/buyers/calllist', requireAuth, (req, res) => {
   try {
+    const sort  = req.query.sort  === 'oldest' ? 'oldest' : 'newest';
+    const group = req.query.group === 'type'   ? 'type'   : 'listing';
+    const sortDir = sort === 'newest' ? 'DESC' : 'ASC';
+
     const rows = db.prepare(`
-      SELECT * FROM buyers
-      WHERE (done_date IS NULL OR done_date = '')
-        AND (status IS NULL OR status = 'active')
-      ORDER BY listing_address ASC, enquiry_date DESC
+      SELECT b.*,
+        ld.address as ld_address, ld.suburb, ld.beds, ld.baths, ld.cars,
+        ld.land_area, ld.building_area, ld.category, ld.price_guide, ld.method,
+        ld.auction_date, ld.headline, ld.description, ld.features,
+        ld.council_rates, ld.water_rates, ld.strata_admin, ld.strata_sinking,
+        ld.strata_total, ld.web_link, ld.listing_status as ld_listing_status, ld.faqs,
+        ld.agentbox_id as ld_agentbox_id
+      FROM buyers b
+      LEFT JOIN listing_details ld ON ld.agentbox_id = b.listing_agentbox_id
+      WHERE (b.done_date IS NULL OR b.done_date = '')
+        AND (b.status IS NULL OR b.status = 'active')
+      ORDER BY b.enquiry_date ${sortDir}
     `).all();
-    // Group by listing_address
-    const grouped = {};
-    for (const b of rows) {
-      const key = b.listing_address || 'Unknown Listing';
-      if (!grouped[key]) grouped[key] = [];
-      grouped[key].push(b);
+
+    const active   = {};
+    const archived = {};
+
+    if (group === 'listing') {
+      for (const b of rows) {
+        const isArchived = b.ld_listing_status === 'withdrawn' || b.ld_listing_status === 'sold';
+        const bucket = isArchived ? archived : active;
+
+        // Build listing address key from listing_details if available, else fall back to buyer's field
+        const addrKey = b.ld_address && b.suburb
+          ? `${b.ld_address}, ${b.suburb}`
+          : (b.listing_address || 'Unknown Listing');
+
+        if (!bucket[addrKey]) {
+          bucket[addrKey] = {
+            listing: b.ld_agentbox_id ? {
+              agentbox_id:   b.ld_agentbox_id,
+              address:       b.ld_address,
+              suburb:        b.suburb,
+              beds:          b.beds,
+              baths:         b.baths,
+              cars:          b.cars,
+              land_area:     b.land_area,
+              building_area: b.building_area,
+              category:      b.category,
+              price_guide:   b.price_guide,
+              method:        b.method,
+              auction_date:  b.auction_date,
+              headline:      b.headline,
+              description:   b.description,
+              features:      b.features,
+              council_rates: b.council_rates,
+              water_rates:   b.water_rates,
+              strata_admin:  b.strata_admin,
+              strata_sinking: b.strata_sinking,
+              strata_total:  b.strata_total,
+              web_link:      b.web_link,
+              faqs:          b.faqs || '[]'
+            } : null,
+            buyers: []
+          };
+        }
+
+        // Strip ld_* fields from the buyer row before pushing
+        const { ld_address, suburb, beds, baths, cars, land_area, building_area, category,
+                price_guide, method, auction_date, headline, description, features,
+                council_rates, water_rates, strata_admin, strata_sinking, strata_total,
+                web_link, ld_listing_status, faqs, ld_agentbox_id, ...buyerRow } = b;
+        bucket[addrKey].buyers.push(buyerRow);
+      }
+    } else {
+      // group === 'type': group by enquiry_type within active/archived
+      for (const b of rows) {
+        const isArchived = b.ld_listing_status === 'withdrawn' || b.ld_listing_status === 'sold';
+        const bucket = isArchived ? archived : active;
+        const typeKey = b.enquiry_type || 'other';
+
+        if (!bucket[typeKey]) bucket[typeKey] = [];
+
+        // Include listing address + listing detail fields inline on the buyer row
+        const buyerWithListing = Object.assign({}, b, {
+          listing_address: b.listing_address || (b.ld_address && b.suburb ? `${b.ld_address}, ${b.suburb}` : null)
+        });
+        bucket[typeKey].push(buyerWithListing);
+      }
     }
-    res.json(grouped);
+
+    res.json({ sort, group, active, archived });
   } catch (e) {
     console.error('[GET /api/buyers/calllist]', e.message);
     res.status(500).json({ error: e.message });
@@ -782,6 +937,30 @@ app.get('/api/buyers/sync/status', requireAuth, (req, res) => {
   res.json(buyerSync);
 });
 
+// GET /api/listing-details — all listing details for display
+app.get('/api/listing-details', requireAuth, (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM listing_details ORDER BY listing_status ASC, address ASC').all();
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT /api/listing-details/:agentboxId — update FAQs (manual entry only)
+app.put('/api/listing-details/:agentboxId', requireAuth, (req, res) => {
+  try {
+    const { agentboxId } = req.params;
+    const { faqs } = req.body;
+    db.prepare(`
+      UPDATE listing_details SET faqs = ?, updated_at = datetime('now','localtime') WHERE agentbox_id = ?
+    `).run(faqs != null ? JSON.stringify(faqs) : '[]', agentboxId);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/intel/upload
 app.post('/api/intel/upload', requireAuth, upload.single('file'), (req, res) => {
   try {
@@ -812,6 +991,168 @@ app.patch('/api/contacts/:id/pricefinder', requireAuth, (req, res) => {
     res.json({ ok: true, id, estimate });
   } catch (e) {
     console.error('[PATCH /api/contacts/:id/pricefinder]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Market Events helpers ────────────────────────────────────────────────────
+
+function categorizePropertyType(type) {
+  if (!type) return 'Unknown';
+  const t = type.toLowerCase();
+  if (/house|semi|terrace|townhouse/i.test(t)) return 'House';
+  if (/unit|apartment|flat|studio/i.test(t)) return 'Unit';
+  return 'Other';
+}
+
+/**
+ * Build scored proximity contacts for a manual market event.
+ * Uses the contacts already loaded in _contactsMap + _rpMap.
+ * Progressive relaxation ladder: same category ±1bed → ±2bed → any bed → all types.
+ */
+function buildScoredContactsForManual(address, details, minCount = 20) {
+  loadCache();
+  const listingCategory = categorizePropertyType(details.propertyType || 'House');
+  const listingBeds = details.beds ? parseInt(details.beds) : null;
+
+  const LOCAL_SUBURBS = ['WILLOUGHBY', 'NORTH WILLOUGHBY', 'WILLOUGHBY EAST',
+                         'CHATSWOOD', 'ARTARMON', 'NAREMBURN', 'CASTLE COVE', 'MIDDLE COVE'];
+
+  // Build candidate pool: all contacts in local suburbs
+  const candidates = [];
+  for (const [id, contact] of (_contactsMap || new Map())) {
+    if (!contact.mobile) continue;
+    const cSuburb = normalizeSuburb(contact.suburb || '');
+    if (!LOCAL_SUBURBS.includes(cSuburb)) continue;
+    const street   = (contact.address || '').toUpperCase().trim();
+    const rpKey    = `${street} ${cSuburb}`.trim();
+    const rpEntry  = _rpMap?.get(rpKey);
+    const score    = calcScore(contact, rpEntry);
+    candidates.push({ id, contact, rpEntry, score, suburb: cSuburb });
+  }
+
+  function scoreWithFilter(bedTolerance, dropCategory) {
+    return candidates.map(({ id, contact, rpEntry, score }) => {
+      if (!rpEntry) return null;
+      if (!dropCategory) {
+        const contactCat = categorizePropertyType(rpEntry['Property Type'] || '');
+        if (contactCat !== listingCategory) return null;
+      }
+      if (!dropCategory && bedTolerance !== null && listingBeds !== null) {
+        const contactBeds = parseInt(rpEntry['Bed'] || '0');
+        if (contactBeds > 0 && Math.abs(listingBeds - contactBeds) > bedTolerance) return null;
+      }
+      return {
+        id,
+        name:     contact.name    || 'Unknown',
+        mobile:   contact.mobile  || '',
+        address:  [contact.address, contact.suburb].filter(Boolean).join(', '),
+        distance: null,
+        score
+      };
+    }).filter(Boolean).sort((a, b) => b.score - a.score);
+  }
+
+  const levels = [
+    () => scoreWithFilter(1, false),
+    () => scoreWithFilter(2, false),
+    () => scoreWithFilter(null, false),
+    () => scoreWithFilter(null, true),
+  ];
+  for (const level of levels) {
+    const scored = level();
+    if (scored.length >= minCount) return scored.slice(0, 20);
+  }
+  return scoreWithFilter(null, true).slice(0, 20);
+}
+
+// POST /api/log-call — log a call outcome for a Just Sold / Just Listed contact
+app.post('/api/log-call', requireAuth, (req, res) => {
+  try {
+    const { contact_id, outcome, notes } = req.body;
+    if (!contact_id || !outcome) {
+      return res.status(400).json({ error: 'contact_id and outcome are required' });
+    }
+    db.prepare(`
+      INSERT INTO call_log (contact_id, called_at, outcome, notes)
+      VALUES (?, datetime('now', 'localtime'), ?, ?)
+    `).run(contact_id, outcome, notes || null);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[POST /api/log-call]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/market-events/manual — manually inject a market event (dashboard + Telegram bot)
+app.post('/api/market-events/manual', requireAuth, (req, res) => {
+  try {
+    const { address, type, beds, baths, cars, property_type, price, suburb } = req.body;
+    if (!address || !type) {
+      return res.status(400).json({ error: 'address and type are required' });
+    }
+    const detectedSuburb = suburb || (() => {
+      const parts = address.split(',').map(s => s.trim());
+      return parts.length > 1 ? parts[parts.length - 1] : 'Willoughby';
+    })();
+
+    // 1. Build scored contacts
+    const details = { propertyType: property_type || 'House', beds: beds || null };
+    const scoredContacts = buildScoredContactsForManual(address, details, 20);
+    const topContacts = scoredContacts.map(c => ({
+      id:       c.id       || '',
+      name:     c.name,
+      mobile:   c.mobile   || '',
+      address:  c.address  || '',
+      distance: c.distance ? Math.round(c.distance) : null
+    }));
+
+    // 2. Insert into market_events (INSERT OR REPLACE logic: delete then insert)
+    db.prepare(`
+      DELETE FROM market_events
+      WHERE address = ? AND type = ? AND date(detected_at) = date('now', 'localtime')
+    `).run(address, type);
+    db.prepare(`
+      INSERT INTO market_events
+        (detected_at, event_date, type, address, suburb, price,
+         beds, baths, cars, property_type, source, top_contacts)
+      VALUES
+        (datetime('now','localtime'), date('now','localtime'), ?, ?, ?, ?,
+         ?, ?, ?, ?, 'Manual', ?)
+    `).run(type, address, detectedSuburb, price || null,
+           beds || null, baths || null, cars || null,
+           property_type || null, JSON.stringify(topContacts));
+
+    // 3. Rebuild listing-alerts.json entry for this address+type
+    try {
+      const newEntry = {
+        detectedAt:   new Date().toISOString(),
+        type,
+        address,
+        price:        price        || '',
+        beds:         beds         || '',
+        baths:        baths        || '',
+        cars:         cars         || '',
+        propertyType: property_type || '',
+        source:       'Manual',
+        topContacts
+      };
+      let alerts = [];
+      if (fs.existsSync(ALERTS_FILE)) {
+        try { alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8')); } catch (_) { alerts = []; }
+      }
+      const idx = alerts.findIndex(a => a.address === address && a.type === type);
+      if (idx >= 0) alerts[idx] = newEntry; else alerts.push(newEntry);
+      alerts = alerts.slice(-20);
+      fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
+    } catch (e) {
+      console.error('[/api/market-events/manual] alerts write failed:', e.message);
+    }
+
+    console.log(`[POST /api/market-events/manual] ${type} @ ${address} — ${topContacts.length} contacts`);
+    res.json({ ok: true, contactCount: topContacts.length });
+  } catch (e) {
+    console.error('[POST /api/market-events/manual]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -891,6 +1232,114 @@ app.post('/api/prospecting/ingest', requireAuth, (req, res) => {
     res.json({ ok: true, upserted });
   } catch (e) {
     console.error('[POST /api/prospecting/ingest]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/search — query properties + contacts with prospecting filters
+app.get('/api/search', requireAuth, (req, res) => {
+  try {
+    const { street, suburb, type, beds_min, beds_max, owner, show_dnc, page } = req.query;
+    const pageNum  = Math.max(1, parseInt(page) || 1);
+    const pageSize = 50;
+    const offset   = (pageNum - 1) * pageSize;
+    const showDnc  = show_dnc === '1' || show_dnc === 'true';
+
+    const conditions = [];
+    const params     = [];
+
+    if (street) {
+      conditions.push("(LOWER(p.street_name) LIKE ? OR LOWER(p.address) LIKE ?)");
+      params.push(`%${street.toLowerCase()}%`, `%${street.toLowerCase()}%`);
+    }
+    if (suburb && suburb !== 'all') {
+      conditions.push("LOWER(p.suburb) LIKE ?");
+      params.push(`%${suburb.toLowerCase()}%`);
+    }
+    if (type && type !== 'all') {
+      conditions.push("LOWER(p.property_type) = ?");
+      params.push(type.toLowerCase());
+    }
+    if (beds_min) {
+      conditions.push("p.beds >= ?");
+      params.push(parseInt(beds_min));
+    }
+    if (beds_max) {
+      conditions.push("p.beds <= ?");
+      params.push(parseInt(beds_max));
+    }
+    if (owner) {
+      conditions.push("(LOWER(p.owner_name) LIKE ? OR LOWER(c.name) LIKE ?)");
+      params.push(`%${owner.toLowerCase()}%`, `%${owner.toLowerCase()}%`);
+    }
+    if (!showDnc) {
+      conditions.push("(p.do_not_call = 0 OR p.do_not_call IS NULL)");
+    }
+
+    const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+    const countRow = db.prepare(`
+      SELECT COUNT(*) AS n
+      FROM properties p
+      LEFT JOIN contacts c ON p.contact_id = c.id
+      ${where}
+    `).get(...params);
+
+    const rows = db.prepare(`
+      SELECT
+        p.id AS property_id,
+        p.address, p.street_number, p.street_name, p.suburb,
+        p.beds, p.baths, p.cars, p.property_type,
+        p.owner_name, p.valuation_amount, p.last_sale_date, p.last_sale_price,
+        p.pf_phone, p.do_not_call, p.government_number,
+        p.contact_id,
+        c.id AS crm_contact_id,
+        c.name AS crm_name,
+        c.mobile AS crm_mobile,
+        c.propensity_score,
+        c.tenure_years,
+        c.occupancy,
+        c.contact_class,
+        COALESCE(c.mobile, p.pf_phone) AS contact_mobile
+      FROM properties p
+      LEFT JOIN contacts c ON p.contact_id = c.id
+      ${where}
+      ORDER BY
+        CASE WHEN c.propensity_score > 0 THEN 0 ELSE 1 END,
+        COALESCE(c.propensity_score, 0) DESC,
+        p.suburb, p.street_name, p.street_number
+      LIMIT ${pageSize} OFFSET ${offset}
+    `).all(...params);
+
+    res.json({
+      results:     rows,
+      total_count: countRow.n,
+      page:        pageNum,
+      page_size:   pageSize,
+      total_pages: Math.ceil(countRow.n / pageSize),
+    });
+  } catch (e) {
+    console.error('[GET /api/search]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/plan/add — add a single contact to today's plan from search results
+app.post('/api/plan/add', requireAuth, (req, res) => {
+  try {
+    const { contact_id } = req.body;
+    if (!contact_id) return res.status(400).json({ error: 'contact_id is required' });
+
+    const planDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
+
+    const r = db.prepare(`
+      INSERT OR IGNORE INTO daily_plans (plan_date, contact_id, source, created_at)
+      VALUES (?, ?, 'search', datetime('now', 'localtime'))
+    `).run(planDate, String(contact_id));
+
+    res.json({ ok: true, added: r.changes > 0 });
+  } catch (e) {
+    console.error('[POST /api/plan/add]', e.message);
     res.status(500).json({ error: e.message });
   }
 });

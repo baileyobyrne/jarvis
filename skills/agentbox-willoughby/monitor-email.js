@@ -650,58 +650,104 @@ function parseCoreLogicAlerts(subject, body) {
   return results;
 }
 
+// ─── SCORED CONTACTS BUILDER (with progressive filter relaxation) ─────────────
+
+/**
+ * Build a scored list of proximity contacts for a market event.
+ * Uses a 4-level relaxation ladder to guarantee at least minCount results:
+ *   1. Same property category + ±1 bed
+ *   2. Same property category + ±2 beds
+ *   3. Same property category only (no bed filter)
+ *   4. All types (drop category + bed filter)
+ * Returns up to 20 scored contact objects.
+ */
+async function buildScoredContacts(address, details, rpMap, minCount = 20) {
+  const listingCategory = categorizePropertyType(details.propertyType || 'House');
+  const listingBeds = details.beds ? parseInt(details.beds) : null;
+  const proximityContacts = await getProximityContacts(address, 200);
+
+  function scoreContacts(bedTolerance, dropCategory) {
+    return proximityContacts.map(c => {
+      const key = normalise(c.address) + '|' + normaliseSuburb(c.suburb);
+      const rpData = rpMap.get(key);
+      if (!rpData) return null;
+      if (!dropCategory) {
+        const contactCategory = categorizePropertyType(rpData.propertyType);
+        if (contactCategory !== listingCategory) return null;
+      }
+      if (!dropCategory && bedTolerance !== null && listingBeds !== null && rpData.beds) {
+        const contactBeds = parseInt(rpData.beds);
+        if (!isNaN(listingBeds) && contactBeds > 0 && Math.abs(listingBeds - contactBeds) > bedTolerance) return null;
+      }
+      const { score, tenure, occupancy } = calculatePropensityScore(c, rpData, c.score);
+      return { ...c, propensityScore: score, tenure, occupancy, propertyType: rpData.propertyType, beds: rpData.beds };
+    }).filter(Boolean).sort((a, b) => b.propensityScore - a.propensityScore);
+  }
+
+  const levels = [
+    () => scoreContacts(1, false),    // Same category + ±1 bed
+    () => scoreContacts(2, false),    // Same category + ±2 beds
+    () => scoreContacts(null, false), // Same category, any beds
+    () => scoreContacts(null, true),  // All types, any beds
+  ];
+
+  for (const level of levels) {
+    const scored = level();
+    if (scored.length >= minCount) return scored.slice(0, 20);
+  }
+
+  // Return whatever is available from the broadest filter
+  return scoreContacts(null, true).slice(0, 20);
+}
+
+// Export for use by snapshot-server.js manual event endpoint
+module.exports = { buildScoredContacts };
+
 // Full pipeline for a single CoreLogic address:
 // proximity match → score → listing-alerts.json + SQLite market_events
 async function processCoreLogicListing(details, rpMap) {
   const address = details.address;
-  const listingCategory = categorizePropertyType(details.propertyType || 'House');
-  const proximityContacts = await getProximityContacts(address, 200);
+  const scoredContacts = await buildScoredContacts(address, details, rpMap, 20);
 
-  const scoredContacts = proximityContacts.map(c => {
-    const key = normalise(c.address) + '|' + normaliseSuburb(c.suburb);
-    const rpData = rpMap.get(key);
-    if (!rpData) return null;
-    const contactCategory = categorizePropertyType(rpData.propertyType);
-    if (contactCategory !== listingCategory) return null;
-    const { score, tenure, occupancy } = calculatePropensityScore(c, rpData, c.score);
-    return { ...c, propensityScore: score, tenure, occupancy, propertyType: rpData.propertyType };
-  }).filter(Boolean);
-
-  const top10 = scoredContacts
-    .sort((a, b) => b.propensityScore - a.propensityScore)
-    .slice(0, 10);
-
-  if (top10.length === 0) {
+  if (scoredContacts.length === 0) {
     console.log(`  → No scored contacts found near ${address}`);
-    // Still write the market event even with no top contacts
     writeMarketEvent(details, []);
     return;
   }
 
-  const topContacts = top10.slice(0, 5).map(c => ({ name: c.name, mobile: c.mobile || '' }));
+  const topContacts = scoredContacts.map(c => ({
+    id:       c.id       || '',
+    name:     c.name,
+    mobile:   c.mobile   || '',
+    address:  c.address  || '',
+    distance: c.distance ? Math.round(c.distance) : null
+  }));
 
   // Write to listing-alerts.json for the dashboard
   try {
     const ALERTS_FILE = '/root/.openclaw/workspace/listing-alerts.json';
     const newEntry = {
-      detectedAt: new Date().toISOString(),
-      type:       details.type,
+      detectedAt:   new Date().toISOString(),
+      type:         details.type,
       address,
-      price:      details.price  || '',
-      beds:       details.beds   || '',
-      baths:      details.baths  || '',
-      cars:       details.cars   || '',
-      source:     'CoreLogic',
+      price:        details.price        || '',
+      beds:         details.beds         || '',
+      baths:        details.baths        || '',
+      cars:         details.cars         || '',
+      propertyType: details.propertyType || '',
+      source:       'CoreLogic',
       topContacts
     };
     let alerts = [];
     if (fs.existsSync(ALERTS_FILE)) {
       try { alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8')); } catch (_) { alerts = []; }
     }
-    alerts.push(newEntry);
+    // Replace existing entry for same address+type, or append
+    const idx = alerts.findIndex(a => a.address === address && a.type === details.type);
+    if (idx >= 0) alerts[idx] = newEntry; else alerts.push(newEntry);
     alerts = alerts.slice(-20);
     fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
-    console.log(`  ✅ CoreLogic → dashboard alert: ${top10.length} contacts for ${address}`);
+    console.log(`  ✅ CoreLogic → dashboard alert: ${scoredContacts.length} contacts for ${address}`);
   } catch (e) {
     console.error('  → Alert log write failed:', e.message);
   }
@@ -816,8 +862,15 @@ async function buildContactList(address, details, rpMap) {
     const contactCategory = categorizePropertyType(rpData.propertyType);
     if (contactCategory !== listingCategory) return null;
 
+    // 4. BED COUNT MATCHING: must be within ±1 of listing bed count
+    if (details.beds) {
+      const listingBeds = parseInt(details.beds);
+      const contactBeds = parseInt(rpData.beds || '0');
+      if (!isNaN(listingBeds) && contactBeds > 0 && Math.abs(listingBeds - contactBeds) > 1) return null;
+    }
+
     const { score, tenure, occupancy } = calculatePropensityScore(c, rpData, c.score);
-    return { ...c, propensityScore: score, tenure, occupancy, propertyType: rpData.propertyType };
+    return { ...c, propensityScore: score, tenure, occupancy, propertyType: rpData.propertyType, beds: rpData.beds };
   }).filter(Boolean);
 
   const top30 = scoredContacts
@@ -1002,40 +1055,67 @@ async function checkEmails() {
         }
 
         // ── NON-CORELOGIC TRACK: AI strategies + Telegram + JSON + SQLite ───
-        const _alertContacts = await buildContactList(details.address, details, rpMap);
+        const scoredForAlert = await buildScoredContacts(details.address, details, rpMap, 20);
 
-        // Extract top contacts for both JSON and SQLite writes
-        const topContacts = (_alertContacts || []).slice(0, 5).map(str => {
-          const nm = str.match(/<b>(.+?)<\/b>/);
-          const mb = str.match(/<code>(.+?)<\/code>/);
-          return { name: nm?.[1] || '', mobile: mb?.[1] || '' };
-        }).filter(c => c.name);
+        // Build topContacts with id/address for JSON and SQLite writes
+        const topContacts = scoredForAlert.map(c => ({
+          id:       c.id       || '',
+          name:     c.name,
+          mobile:   c.mobile   || '',
+          address:  c.address  || '',
+          distance: c.distance ? Math.round(c.distance) : null
+        }));
 
-        // Send a single concise heads-up to Telegram (Part C — updated message)
-        const alertMsg =
-          `🚨 URGENT MARKET EVENT: A property at ${details.address} just ${details.type === 'sold' ? 'sold' : 'listed'}.\n\n` +
-          `Open your Jarvis dashboard to see the top neighbours to call.`;
-        await sendTelegram(alertMsg);
+        // Send Jarvis-style contextual alert to Telegram (no contact list — that's the dashboard's job)
+        {
+          const isSold = details.type === 'sold';
+          const propParts = [
+            details.beds   ? `${details.beds}bed`   : null,
+            details.baths  ? `${details.baths}bath`  : null,
+            details.cars   ? `${details.cars}car`    : null,
+            details.propertyType || null
+          ].filter(Boolean).join(' · ');
+          const priceStr = details.price ? `💰 ${details.price}` : '💰 Price withheld';
+          let commentary;
+          if (isSold) {
+            const cat = categorizePropertyType(details.propertyType || '');
+            if (cat === 'Unit') {
+              commentary = `Unit comp in the pocket — any similar owner nearby who's been sitting on it should be getting a call this week.`;
+            } else {
+              commentary = `Strong house comp — opens the conversation with long-tenure owners in the street. Dashboard has the ranked list.`;
+            }
+          } else {
+            commentary = `Fresh listing on the market — buyers who miss out are your best prospective vendors. Keep an eye on the campaign.`;
+          }
+          const alertMsg = `${isSold ? '🔨' : '🏠'} <b>${isSold ? 'SOLD' : 'NEW LISTING'} — ${details.address}</b>\n\n` +
+            `${priceStr}\n` +
+            (propParts ? `🏠 ${propParts}\n` : '') +
+            `\n💡 ${commentary}`;
+          await sendTelegram(alertMsg);
+        }
 
-        // Log alert to listing-alerts.json for the dashboard (unchanged)
+        // Log alert to listing-alerts.json for the dashboard
         try {
           const ALERTS_FILE = '/root/.openclaw/workspace/listing-alerts.json';
           const newEntry = {
-            detectedAt: new Date().toISOString(),
-            type:       details.type,
-            address:    details.address,
-            price:      details.price  || '',
-            beds:       details.beds   || '',
-            baths:      details.baths  || '',
-            cars:       details.cars   || '',
-            source:     details.source,
+            detectedAt:   new Date().toISOString(),
+            type:         details.type,
+            address:      details.address,
+            price:        details.price        || '',
+            beds:         details.beds         || '',
+            baths:        details.baths        || '',
+            cars:         details.cars         || '',
+            propertyType: details.propertyType || '',
+            source:       details.source,
             topContacts
           };
           let alerts = [];
           if (fs.existsSync(ALERTS_FILE)) {
             try { alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8')); } catch (_) { alerts = []; }
           }
-          alerts.push(newEntry);
+          // Replace existing entry for same address+type, or append
+          const idx = alerts.findIndex(a => a.address === details.address && a.type === details.type);
+          if (idx >= 0) alerts[idx] = newEntry; else alerts.push(newEntry);
           alerts = alerts.slice(-20);
           fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
         } catch (e) {

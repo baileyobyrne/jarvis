@@ -1,60 +1,110 @@
 /**
- * fetch-buyer-enquiries.js
+ * fetch-buyer-enquiries.js (v3 — hybrid fast)
  *
- * Fetches buyer enquiries from AgentBox for Bailey O'Byrne's active listings
- * and saves them to SQLite buyers table.
+ * Fetches buyer enquiries for Bailey O'Byrne's listings and saves to SQLite.
+ *
+ * Architecture:
+ *   - Browser (Playwright) handles ONLY the admin API (enquiry ID lists).
+ *     The admin API session is tied to the live browser context.
+ *   - Node.js native fetch handles ALL Bearer API calls (enquiry details +
+ *     contacts). These run in parallel and are much faster than page.evaluate.
+ *   - All 5 listings have their enquiry IDs collected up-front, then all
+ *     detail/contact fetching happens in parallel across listings.
  *
  * Usage:
- *   node fetch-buyer-enquiries.js              # normal run
- *   node fetch-buyer-enquiries.js --discover   # dump raw structures to debug
- *
- * How it works:
- *   1. Navigate to app.sales.reapit.com.au/contacts to capture Bearer token
- *   2. Navigate to admin master to capture x-api-key + x-csrf-token
- *   3. Scan last listing pages to find Bailey's active listings (McGrath Willoughby, Available)
- *   4. For each listing: fetch enquiries via admin proxy API (filter[listingId])
- *   5. For each enquiry: fetch detail (Bearer) to get contact ID, then fetch contact
- *   6. Save new buyers to SQLite
- *
- * Requires browser-state.json (from refetch-contacts-full.js session).
+ *   node fetch-buyer-enquiries.js          # fast: page 1 only (50 most recent per listing)
+ *   node fetch-buyer-enquiries.js --full   # deep backfill: all pages (slow, first run only)
  */
 
 require('dotenv').config({ path: '../../.env' });
 const { chromium } = require('playwright');
-const fs = require('fs');
+const fs   = require('fs');
 const { db } = require('../../lib/db.js');
 
-const STATEFILE = '/root/.openclaw/skills/agentbox-willoughby/browser-state.json';
-const BASE_API  = 'https://mcgrathlovelocal.agentboxcrm.com.au/admin/api';
-const ADMIN_API = '/mcgrathlovelocal/admin/api';
-const DISCOVER  = process.argv.includes('--discover');
+const STATEFILE  = '/root/.openclaw/skills/agentbox-willoughby/browser-state.json';
+const BEARER_API = 'https://mcgrathlovelocal.agentboxcrm.com.au/admin/api';
+const ADMIN_API  = '/mcgrathlovelocal/admin/api'; // relative — used in page.evaluate
+const FULL_SYNC  = process.argv.includes('--full'); // paginate all pages when true
+
+// Bailey's confirmed active listings. Update manually when listings change.
+// To find IDs: app.sales.reapit.com.au/properties → All My Properties →
+//   View My Listings → Refine → Assigned Staff: Bailey O'Byrne.
+const BAILEY_LISTING_IDS = [
+  '264P23772', // 85 Sydney Street, Willoughby
+  '264P31107', // 26/166 Mowbray Road, Willoughby
+  '264P21442', // 15A Second Avenue, Willoughby
+  '264P23657', // 24 Waratah Street, Roseville
+  '264P31230', // 206/72 Laurel Street, Willoughby
+];
 
 // ─── helpers ────────────────────────────────────────────────────────────────
-
-function listingAddress(listing) {
-  const a = (listing.property && listing.property.address) || listing.address || {};
-  const streetAddress = a.streetAddress || `${a.streetNum || ''} ${a.streetName || ''} ${a.streetType || ''}`.trim();
-  const suburb = a.suburb || '';
-  if (streetAddress && suburb) return `${streetAddress}, ${suburb}`;
-  if (streetAddress) return streetAddress;
-  return a.displayAddress || a.fullAddress || `Listing ${listing.id}`;
-}
 
 function enqType(src) {
   if (!src) return 'other';
   const s = src.toLowerCase();
-  if (s.includes('inspect')) return 'inspection';
-  if (s.includes('online') || s.includes('portal') || s.includes('web')) return 'online_enquiry';
+  if (s.includes('inspect') || s.includes('online') || s.includes('portal') || s.includes('web')) return 'online_enquiry';
   if (s.includes('callback') || s.includes('call back')) return 'callback';
   return 'other';
 }
 
+// Bearer API: called directly from Node.js — no browser overhead
+async function bearerGet(path, auth) {
+  const res = await fetch(`${BEARER_API}${path}`, {
+    headers: {
+      Accept: 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+      Authorization: auth.bearerToken,
+      'x-client-id': auth.clientId,
+    },
+  });
+  if (!res.ok) {
+    const err = new Error(`Bearer API ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
+// ─── DB statements ───────────────────────────────────────────────────────────
+
+const upsertListing = db.prepare(`
+  INSERT INTO listing_details
+    (agentbox_id, address, suburb, beds, baths, cars,
+     land_area, building_area, category, price_guide, method,
+     auction_date, headline, description, features,
+     council_rates, water_rates, strata_admin, strata_sinking, strata_total,
+     web_link, listing_status, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+  ON CONFLICT(agentbox_id) DO UPDATE SET
+    address=excluded.address, suburb=excluded.suburb,
+    beds=excluded.beds, baths=excluded.baths, cars=excluded.cars,
+    land_area=excluded.land_area, building_area=excluded.building_area,
+    category=excluded.category, price_guide=excluded.price_guide,
+    method=excluded.method, auction_date=excluded.auction_date,
+    headline=excluded.headline, description=excluded.description,
+    features=excluded.features,
+    council_rates=excluded.council_rates, water_rates=excluded.water_rates,
+    strata_admin=excluded.strata_admin, strata_sinking=excluded.strata_sinking,
+    strata_total=excluded.strata_total, web_link=excluded.web_link,
+    listing_status=excluded.listing_status,
+    updated_at=datetime('now','localtime')
+`);
+
+const insertBuyer = db.prepare(`
+  INSERT INTO buyers
+    (listing_address, listing_agentbox_id, buyer_name, buyer_mobile, buyer_email,
+     enquiry_type, enquiry_date, notes)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
 // ─── main ───────────────────────────────────────────────────────────────────
 
 (async () => {
+  const t0 = Date.now();
+
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-web-security'],
+    args: ['--no-sandbox', '--disable-dev-shm-usage'],
   });
 
   const context = fs.existsSync(STATEFILE)
@@ -63,273 +113,244 @@ function enqType(src) {
 
   const page = await context.newPage();
 
-  // Capture both auth mechanisms simultaneously
-  let authToken = null;
-  let clientId  = null;
-  let xApiKey   = null;
-  let xCsrfToken = null;
+  // Capture both auth tokens
+  let bearerToken = null, clientId = null, xApiKey = null, xCsrfToken = null;
 
-  page.on('request', request => {
-    const u = request.url();
-    if (u.includes('api.agentboxcrm.com.au') && request.headers()['authorization']) {
-      authToken = request.headers()['authorization'];
-      clientId  = request.headers()['x-client-id'];
+  page.on('request', req => {
+    const u = req.url();
+    if (u.includes('api.agentboxcrm.com.au') && req.headers()['authorization']) {
+      bearerToken = req.headers()['authorization'];
+      clientId    = req.headers()['x-client-id'];
     }
-    if (u.includes('/mcgrathlovelocal/admin/api/') && request.headers()['x-api-key']) {
-      xApiKey    = request.headers()['x-api-key'];
-      xCsrfToken = request.headers()['x-csrf-token'];
+    if (u.includes('/mcgrathlovelocal/admin/api/') && req.headers()['x-api-key']) {
+      xApiKey    = req.headers()['x-api-key'];
+      xCsrfToken = req.headers()['x-csrf-token'];
     }
   });
 
-  // ── Step 1: Load contacts page to capture Bearer token ──────────────────
+  // ── Step 1: Capture Bearer token ──────────────────────────────────────────
   console.log('🔑 Loading session…');
   await page.goto('https://app.sales.reapit.com.au/contacts', { waitUntil: 'networkidle' });
-  await page.waitForTimeout(5000);
+  await page.waitForTimeout(4000);
 
   if (page.url().includes('auth.au.rc.reapit.cloud')) {
-    console.log('⚠️  Session expired — re-logging in…');
-    await page.evaluate((creds) => {
+    console.log('   Session expired — re-logging in…');
+    await page.evaluate((c) => {
       const u = document.querySelector('#signInFormUsername');
       const p = document.querySelector('#signInFormPassword');
       if (u && p) {
-        u.value = creds.username;
-        u.dispatchEvent(new Event('input', { bubbles: true }));
-        p.value = creds.password;
-        p.dispatchEvent(new Event('input', { bubbles: true }));
+        u.value = c.username; u.dispatchEvent(new Event('input', { bubbles: true }));
+        p.value = c.password; p.dispatchEvent(new Event('input', { bubbles: true }));
         document.querySelector('form')?.submit();
       }
     }, { username: process.env.AGENTBOX_USERNAME, password: process.env.AGENTBOX_PASSWORD });
     await page.waitForURL('**/app.sales.reapit.com.au/**', { timeout: 30000 });
     await page.waitForLoadState('networkidle', { timeout: 20000 });
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(4000);
     await context.storageState({ path: STATEFILE });
-    console.log('✅ Re-login successful — session saved.');
   }
 
-  if (!authToken) {
+  if (!bearerToken) {
     await page.reload({ waitUntil: 'networkidle' });
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(4000);
   }
 
-  if (!authToken) {
-    console.error('❌ Failed to capture Bearer token. Exiting.');
+  if (!bearerToken) {
+    console.error('❌ Failed to capture Bearer token.');
     await browser.close();
-    return;
+    process.exit(1);
   }
+  console.log('   Bearer: ✓');
 
-  console.log('   Bearer token: ✓');
-
-  // ── Step 2: Load admin master to capture x-api-key + x-csrf-token ───────
-  console.log('   Loading admin session…');
-  await page.goto('https://app.sales.reapit.com.au/mcgrathlovelocal/admin/master?iframe_in_react_app=1', { waitUntil: 'networkidle', timeout: 30000 });
-  await page.waitForTimeout(6000);
+  // ── Step 2: Capture admin tokens ──────────────────────────────────────────
+  await page.goto('https://app.sales.reapit.com.au/mcgrathlovelocal/admin/master?iframe_in_react_app=1', {
+    waitUntil: 'networkidle', timeout: 30000,
+  });
+  await page.waitForTimeout(5000);
 
   if (!xApiKey) {
-    console.error('❌ Failed to capture admin API key. Exiting.');
+    console.error('❌ Failed to capture admin API key.');
     await browser.close();
-    return;
+    process.exit(1);
   }
-  console.log('   Admin API key:  ✓');
+  console.log('   Admin key: ✓');
   await context.storageState({ path: STATEFILE });
 
-  // ── Step 3: Find Bailey's active listings ────────────────────────────────
-  console.log('\n📋 Scanning listings for McGrath Willoughby (Available)…');
+  const auth = { bearerToken, clientId, xApiKey, xCsrfToken };
 
-  const pageCount = await page.evaluate(async ({ BASE_API, authToken, clientId }) => {
-    const res = await fetch(`${BASE_API}/listings?limit=50&page=1&version=2`, {
-      credentials: 'include',
-      headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', Authorization: authToken, 'x-client-id': clientId },
-    });
-    const data = await res.json();
-    return parseInt(data?.response?.last || 1);
-  }, { BASE_API, authToken, clientId });
+  // ── Step 3: Upsert listing details via Bearer API (from Node.js, parallel) ─
+  console.log('\n📐 Upserting listing details…');
+  await Promise.all(BAILEY_LISTING_IDS.map(async lid => {
+    try {
+      const data = await bearerGet(`/listings/${lid}?version=2`, auth);
+      const detail = data?.response?.listing;
+      if (!detail) return;
+      const p = detail.property || {}, o = detail.outgoings || {}, addr = p.address || {};
+      const fmt = (obj) => obj?.value ? `${obj.value} / ${obj.period || 'year'}` : '';
+      upsertListing.run(
+        lid, addr.streetAddress || lid, addr.suburb || '',
+        p.bedrooms || '', p.bathrooms || '', p.totalParking || p.carSpaces || '',
+        p.landArea?.value ? `${p.landArea.value} ${p.landArea.unit || 'sqm'}`.trim() : '',
+        p.buildingArea?.value ? `${p.buildingArea.value} ${p.buildingArea.unit || 'sqm'}`.trim() : '',
+        p.category || '', detail.displayPrice || '', detail.method || '',
+        detail.auctionDate || '', detail.mainHeadline || '', detail.mainDescription || '',
+        JSON.stringify(Array.isArray(p.features) ? p.features : []),
+        fmt(o.councilRates), fmt(o.waterRates),
+        fmt(o.strataAdmin), fmt(o.strataSinking), fmt(o.strataTotal),
+        detail.webLink || '', 'active',
+      );
+      console.log(`   ✓ ${addr.streetAddress || lid}`);
+    } catch (e) {
+      console.log(`   ⚠️  ${lid}: ${e.message}`);
+    }
+  }));
 
-  const scanFrom = Math.max(1, pageCount - 20);
-  console.log(`   Scanning pages ${scanFrom}–${pageCount} (of ${pageCount} total)…`);
+  // Build address map for buyer insert
+  const addrMap = {};
+  BAILEY_LISTING_IDS.forEach(lid => {
+    const row = db.prepare('SELECT address, suburb FROM listing_details WHERE agentbox_id = ?').get(lid);
+    addrMap[lid] = row ? `${row.address}, ${row.suburb}`.replace(/, *$/, '') : lid;
+  });
 
-  const myListings = [];
-  for (let p = scanFrom; p <= pageCount; p++) {
-    const listings = await page.evaluate(async ({ BASE_API, authToken, clientId, p }) => {
-      const res = await fetch(`${BASE_API}/listings?limit=50&page=${p}&version=2`, {
-        credentials: 'include',
-        headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', Authorization: authToken, 'x-client-id': clientId },
+  // ── Step 4: Collect enquiry IDs via admin API (browser, all listings parallel) ─
+  // Admin API requires the live browser session — page.evaluate is the only way.
+  // All listings fetched in ONE page.evaluate call to avoid per-call browser overhead.
+  // Default: page 1 only (50 most recent). Pass --full to paginate all pages.
+  console.log(`\n📋 Collecting enquiry IDs${FULL_SYNC ? ' (all pages — full sync)' : ' (page 1 only, parallel)'}…`);
+
+  const rawResults = await page.evaluate(async ({ ADMIN_API, xApiKey, xCsrfToken, listingIds, fullSync }) => {
+    const headers = {
+      Accept: 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+      'x-api-key': xApiKey,
+      'x-csrf-token': xCsrfToken,
+    };
+
+    async function fetchPage(lid, p) {
+      const res = await fetch(`${ADMIN_API}/enquiries?filter[listingId]=${lid}&limit=50&page=${p}&version=2`, {
+        credentials: 'include', headers,
       });
-      if (!res.ok) return [];
+      if (!res.ok) return { ok: false, status: res.status, lid, p };
       const data = await res.json();
-      return (data?.response?.listings || []).filter(l => {
-        const mkt = (l.marketingStatus || l.status || '').toLowerCase();
-        const isAvailable = mkt === 'available' || mkt === 'current';
-        const isWilloughby = String(l.officeId || '') === '270' ||
-          (l.officeName || '').toLowerCase().includes('willoughby');
-        return isAvailable && isWilloughby;
-      });
-    }, { BASE_API, authToken, clientId, p });
-    myListings.push(...listings);
-  }
+      const resp = data?.response || {};
+      return { ok: true, lid, p, last: parseInt(resp.last || 1), total: resp.items || 0, ids: (resp.enquiries || []).map(e => String(e.id)) };
+    }
 
-  if (myListings.length === 0) {
-    console.warn('⚠️  No active listings found for McGrath Willoughby.');
-    await browser.close();
-    return;
-  }
+    // Fetch page 1 for all listings in parallel
+    const page1Results = await Promise.all(listingIds.map(lid => fetchPage(lid, 1)));
 
-  console.log(`✅ Found ${myListings.length} active listing(s).`);
+    if (!fullSync) return page1Results;
 
-  // ── DISCOVER mode ────────────────────────────────────────────────────────
-  if (DISCOVER) {
-    const lid = String(myListings[0].id);
-    const addr = listingAddress(myListings[0]);
-    console.log(`\n─── DISCOVER: ${addr} (${lid}) ───`);
-
-    const r = await page.evaluate(async ({ ADMIN_API, BASE_API, authToken, clientId, xApiKey, xCsrfToken, lid }) => {
-      const adminH = { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'x-api-key': xApiKey, 'x-csrf-token': xCsrfToken };
-      const bearerH = { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', Authorization: authToken, 'x-client-id': clientId };
-
-      const enqList = await fetch(`${ADMIN_API}/enquiries?filter[listingId]=${lid}&limit=5&page=1&version=2`, { credentials: 'include', headers: adminH });
-      const enqData = await enqList.json();
-      const enqs = enqData?.response?.enquiries || [];
-      const firstEnq = enqs[0];
-
-      let enqDetail = null, contact = null;
-      if (firstEnq?.id) {
-        const dr = await fetch(`${BASE_API}/enquiries/${firstEnq.id}?version=2`, { credentials: 'include', headers: bearerH });
-        enqDetail = (await dr.json())?.response?.enquiry;
-        if (enqDetail?.attachedContact?.id) {
-          const cr = await fetch(`${BASE_API}/contacts/${enqDetail.attachedContact.id}?version=2`, { credentials: 'include', headers: bearerH });
-          contact = (await cr.json())?.response?.contact;
-        }
+    // --full: fetch remaining pages for listings that have more than 1 page
+    const extraFetches = [];
+    for (const r of page1Results) {
+      if (r.ok && r.last > 1) {
+        for (let p = 2; p <= r.last; p++) extraFetches.push(fetchPage(r.lid, p));
       }
-      return { total: enqData?.response?.items, lastPage: enqData?.response?.last, enqKeys: enqs[0] ? Object.keys(enqs[0]) : [], firstEnq, enqDetail, contact };
-    }, { ADMIN_API, BASE_API, authToken, clientId, xApiKey, xCsrfToken, lid });
+    }
+    const extraResults = await Promise.all(extraFetches);
+    return [...page1Results, ...extraResults];
+  }, { ADMIN_API, xApiKey, xCsrfToken, listingIds: BAILEY_LISTING_IDS, fullSync: FULL_SYNC });
 
-    console.log(`Enquiries for this listing: ${r.total} (${r.lastPage} page(s))`);
-    console.log('Enquiry list keys:', r.enqKeys.join(', '));
-    console.log('\nFirst enquiry:', JSON.stringify(r.firstEnq, null, 2));
-    console.log('\nEnquiry detail:', JSON.stringify(r.enqDetail, null, 2));
-    console.log('\nContact:', JSON.stringify(r.contact, null, 2));
-    await browser.close();
-    return;
+  // Merge results by listing
+  const enquiryIdsByListing = {};
+  for (const r of rawResults) {
+    if (!r.ok) { console.log(`   ⚠️  ${r.lid} page ${r.p}: admin API ${r.status}`); continue; }
+    if (r.p === 1) {
+      const pageNote = FULL_SYNC ? `${r.last} page(s)` : `page 1 of ${r.last}`;
+      console.log(`   ${r.lid}: ${r.total} total enquiries (fetching ${pageNote})`);
+      enquiryIdsByListing[r.lid] = [];
+    }
+    enquiryIdsByListing[r.lid].push(...r.ids);
   }
 
-  // ── Step 4: Fetch and save enquiries for each listing ────────────────────
+  // Browser is no longer needed — close it now
+  await browser.close();
+  console.log('   Browser closed ✓');
 
-  const existingSet = new Set(
-    db.prepare("SELECT listing_agentbox_id || '|' || COALESCE(buyer_email,'') AS key FROM buyers")
-      .all().map(r => r.key)
+  // ── Step 5: Fetch enquiry details + contacts via Node.js (parallel) ────────
+  console.log('\n📬 Fetching enquiry details and contacts (parallel)…');
+
+  const existingKeys = new Set(
+    db.prepare("SELECT listing_agentbox_id || '|' || COALESCE(buyer_email,'') AS k FROM buyers")
+      .all().map(r => r.k)
   );
 
-  const insertBuyer = db.prepare(`
-    INSERT INTO buyers
-      (listing_address, listing_agentbox_id, buyer_name, buyer_mobile, buyer_email,
-       enquiry_type, enquiry_date, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+  // Count existing buyers per listing for early-exit check
+  const existingCountByListing = {};
+  BAILEY_LISTING_IDS.forEach(lid => {
+    existingCountByListing[lid] = db.prepare('SELECT COUNT(*) AS c FROM buyers WHERE listing_agentbox_id = ?').get(lid)?.c || 0;
+  });
 
-  let totalNew = 0;
-  let totalSkipped = 0;
+  const BATCH = 20; // parallel fetch size
+  let totalNew = 0, totalSkipped = 0;
 
-  for (const listing of myListings) {
-    const lid     = String(listing.id);
-    const address = listingAddress(listing);
-    console.log(`\n🏠 ${address} (${lid})`);
-
-    // Fetch all enquiry pages via admin proxy API
-    const enquiryIds = [];
-    let enqLastPage = 1;
-
-    for (let p = 1; p <= enqLastPage; p++) {
-      const enqRaw = await page.evaluate(async ({ ADMIN_API, xApiKey, xCsrfToken, lid, p }) => {
-        const headers = { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'x-api-key': xApiKey, 'x-csrf-token': xCsrfToken };
-        const res = await fetch(`${ADMIN_API}/enquiries?filter[listingId]=${lid}&limit=50&page=${p}&version=2`, { credentials: 'include', headers });
-        if (!res.ok) return { ok: false, status: res.status };
-        const data = await res.json();
-        const resp = data?.response || {};
-        return { ok: true, last: parseInt(resp.last || 1), total: resp.items || 0, ids: (resp.enquiries || []).map(e => e.id) };
-      }, { ADMIN_API, xApiKey, xCsrfToken, lid, p });
-
-      if (!enqRaw.ok) {
-        console.log(`   ⚠️  Admin API returned ${enqRaw.status}`);
-        break;
-      }
-      if (p === 1) {
-        enqLastPage = enqRaw.last;
-        console.log(`   ${enqRaw.total} enquirie(s) found across ${enqRaw.last} page(s).`);
-      }
-      enquiryIds.push(...enqRaw.ids);
-    }
-
+  for (const lid of BAILEY_LISTING_IDS) {
+    const enquiryIds = enquiryIdsByListing[lid] || [];
     if (enquiryIds.length === 0) continue;
 
-    // Batch-fetch enquiry details (Bearer token) to get attachedContact.id
-    const BATCH = 10;
-    const contactIds = [];
-
-    for (let i = 0; i < enquiryIds.length; i += BATCH) {
-      const batch = enquiryIds.slice(i, i + BATCH);
-      const details = await page.evaluate(async ({ BASE_API, authToken, clientId, ids }) => {
-        const headers = { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', Authorization: authToken, 'x-client-id': clientId };
-        return Promise.all(ids.map(async id => {
-          try {
-            const res = await fetch(`${BASE_API}/enquiries/${id}?version=2`, { credentials: 'include', headers });
-            const data = await res.json();
-            const enq = data?.response?.enquiry || {};
-            return {
-              id,
-              contactId: enq.attachedContact?.id || null,
-              listingId: enq.attachedListing?.id || null,
-              date: enq.date || enq.firstCreated || null,
-              comment: enq.comment || null,
-              type: enq.type || enq.origin || null,
-            };
-          } catch { return null; }
-        }));
-      }, { BASE_API, authToken, clientId, ids: batch });
-
-      details.filter(Boolean).forEach(d => {
-        if (d.contactId) contactIds.push({ ...d });
-      });
+    // Skip bearer calls entirely if we already have at least as many buyers as IDs fetched
+    // (means page 1 is fully cached — no new enquiries on this listing)
+    if (!FULL_SYNC && existingCountByListing[lid] >= enquiryIds.length) {
+      console.log(`   ${lid} (${addrMap[lid]}): skipped — already up to date`);
+      continue;
     }
 
-    // Batch-fetch contact details
-    for (let i = 0; i < contactIds.length; i += BATCH) {
-      const batch = contactIds.slice(i, i + BATCH);
-      const contacts = await page.evaluate(async ({ BASE_API, authToken, clientId, items }) => {
-        const headers = { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest', Authorization: authToken, 'x-client-id': clientId };
-        return Promise.all(items.map(async item => {
-          try {
-            const res = await fetch(`${BASE_API}/contacts/${item.contactId}?version=2`, { credentials: 'include', headers });
-            const data = await res.json();
-            const c = data?.response?.contact || {};
-            return { ...item, contact: c };
-          } catch { return null; }
-        }));
-      }, { BASE_API, authToken, clientId, items: batch });
+    // Fetch all enquiry details in parallel batches
+    const enriched = [];
+    for (let i = 0; i < enquiryIds.length; i += BATCH) {
+      const batch = enquiryIds.slice(i, i + BATCH);
+      const results = await Promise.all(batch.map(async id => {
+        try {
+          const d = await bearerGet(`/enquiries/${id}?version=2`, auth);
+          const enq = d?.response?.enquiry || {};
+          return {
+            id,
+            contactId: enq.attachedContact?.id || null,
+            date: enq.date || enq.firstCreated || null,
+            comment: enq.comment || null,
+            type: enq.type || enq.origin || null,
+          };
+        } catch { return null; }
+      }));
+      enriched.push(...results.filter(Boolean).filter(r => r.contactId));
+    }
+
+    // Fetch all contacts in parallel batches
+    let newCount = 0, skipped = 0;
+    for (let i = 0; i < enriched.length; i += BATCH) {
+      const batch = enriched.slice(i, i + BATCH);
+      const contacts = await Promise.all(batch.map(async item => {
+        try {
+          const d = await bearerGet(`/contacts/${item.contactId}?version=2`, auth);
+          return { ...item, contact: d?.response?.contact || {} };
+        } catch { return null; }
+      }));
 
       for (const row of contacts.filter(Boolean)) {
         const c = row.contact;
-        const firstName = c.firstName || '';
-        const lastName  = c.lastName  || '';
-        const name   = `${firstName} ${lastName}`.trim() || 'Unknown';
+        const name  = `${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Unknown';
         const mobile = c.mobile || c.homePhone || c.workPhone || null;
-        const email  = c.email  || null;
-        const type   = enqType(row.type || '');
-        const date   = row.date   || null;
-        const notes  = row.comment || null;
+        const email  = c.email || null;
+        const key    = `${lid}|${email || ''}`;
 
-        const key = `${lid}|${email || ''}`;
-        if (existingSet.has(key)) { totalSkipped++; continue; }
+        if (existingKeys.has(key)) { skipped++; continue; }
 
         try {
-          insertBuyer.run(address, lid, name, mobile, email, type, date, notes);
-          existingSet.add(key);
-          totalNew++;
+          insertBuyer.run(addrMap[lid], lid, name, mobile, email, enqType(row.type || ''), row.date || null, row.comment || null);
+          existingKeys.add(key);
+          newCount++;
         } catch (e) {
-          console.warn(`   ⚠️  Insert failed for ${name}: ${e.message}`);
+          console.warn(`   ⚠️  Insert failed (${name}): ${e.message}`);
         }
       }
     }
+
+    console.log(`   ${lid} (${addrMap[lid]}): +${newCount} new, ${skipped} already existed`);
+    totalNew     += newCount;
+    totalSkipped += skipped;
   }
 
-  console.log(`\n✅ Done. ${totalNew} new enquiries saved, ${totalSkipped} already existed.`);
-  await browser.close();
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  console.log(`\n✅ Done in ${elapsed}s — ${totalNew} new buyers saved, ${totalSkipped} skipped.`);
 })();

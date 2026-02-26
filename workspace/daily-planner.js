@@ -1,6 +1,24 @@
 const fs = require('fs');
+const https = require('https');
 const axios = require('axios');
 require('dotenv').config({ path: '/root/.openclaw/.env', override: true });
+
+function sendTelegram(message) {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+    if (!token || !chatId) return Promise.resolve();
+    const body = JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'HTML' });
+    return new Promise(resolve => {
+        const req = https.request({
+            hostname: 'api.telegram.org',
+            path: `/bot${token}/sendMessage`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+        }, resolve);
+        req.write(body);
+        req.end();
+    });
+}
 
 const { db } = require('../lib/db.js');
 
@@ -145,6 +163,23 @@ async function generateTalkingPoint(contact, truthEntry) {
         }
     }
 
+    // Pull real recent sold events from SQLite (last 30 days only — older is stale)
+    const recentSoldEvents = db.prepare(`
+        SELECT address, price, beds, baths, property_type, detected_at
+        FROM market_events
+        WHERE type = 'sold'
+          AND detected_at > datetime('now', '-30 days')
+        ORDER BY detected_at DESC
+        LIMIT 5
+    `).all();
+    const recentSalesText = recentSoldEvents.length > 0
+        ? recentSoldEvents.map(s => {
+            const d = new Date(s.detected_at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' });
+            const detail = [s.beds ? `${s.beds}bed` : null, s.property_type || null].filter(Boolean).join(' ');
+            return `• ${s.address}${detail ? ` (${detail})` : ''} — ${s.price || 'price withheld'} — ${d}`;
+          }).join('\n')
+        : null;
+
     const context = {
         name: contact.name,
         address: contact.address || truthEntry?.['Street Address'],
@@ -169,13 +204,14 @@ Data available:
 - Contact Class: ${context.contactClass}
 - Past Appraisals: ${context.appraisals}
 - Notes: ${context.notes}
+${recentSalesText ? `\nConfirmed recent sales in the area (last 30 days — use ONLY these if referencing specific comps):\n${recentSalesText}` : '\nNo confirmed recent sales available in the last 30 days.'}
 
 You must format the output identically for every single contact. Do NOT use Markdown asterisks (**). Use clean bullet points and standard emojis so it renders cleanly in a structured text field.
 
 Cover these 4 areas in order, each as exactly one tight bullet point (add a 5th only if there is a genuinely strong additional angle):
 
 📌 DATA TRIGGER: [Tenure or occupancy signal — e.g. "Owned 11 years — statistically overdue for a move" or "Investor — not emotionally attached, motivated by yield"]
-📈 VALUE ADD: [Specific local market intel to offer — e.g. "Recent comp at 42 Smith St sold $2.1M — strong conversation anchor"]
+📈 VALUE ADD: [If confirmed recent sales are listed above, reference one specifically by address, price, and date. If no confirmed sales are listed, reference strong current buyer demand or market conditions in general terms — do NOT invent or assume any specific address, street name, or sale price.]
 📋 CRM HOOK: [Reference past notes or appraisal history to personalise the call — e.g. "Appraised in 2021 — worth revisiting given where the market sits now"]
 🎯 STRATEGIC ASK: [The one clear ask for this call — e.g. "Float a no-pressure market appraisal"]
 
@@ -457,6 +493,28 @@ async function main() {
 
     // ─── SQLITE (parallel write — JSON above is the fallback during migration) ─
     writeToDB(finalPayload);
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ─── TELEGRAM MORNING BRIEFING ────────────────────────────────────────────
+    try {
+        const dateStr = new Date().toLocaleDateString('en-AU', {
+            weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Australia/Sydney'
+        });
+        const top3 = finalPayload.slice(0, 3).map((c, i) => {
+            const tenureStr = c.tenure && c.tenure !== 'Unknown' ? ` — ${c.tenure} owned` : '';
+            const classStr = c.occupancy && c.occupancy !== 'Unknown' ? ` · ${c.occupancy}` : '';
+            return `${i + 1}. <b>${c.name}</b>${tenureStr}${classStr}`;
+        }).join('\n');
+        const telegramMsg =
+            `🌅 <b>Good morning, Bailey!</b>\n\n` +
+            `📋 <b>${finalPayload.length} calls loaded for ${dateStr}</b>\n\n` +
+            `🎯 Top priority today:\n${top3}\n\n` +
+            `Dashboard is ready. Let's get after it. 💪`;
+        await sendTelegram(telegramMsg);
+        console.log('Morning Telegram briefing sent.');
+    } catch (e) {
+        console.error('Telegram briefing failed (non-fatal):', e.message);
+    }
     // ─────────────────────────────────────────────────────────────────────────
 }
 
