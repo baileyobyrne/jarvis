@@ -2484,3 +2484,34 @@ body::before {
   gap: 6px;
   flex-wrap: wrap;
 }
+
+/* ── Listing Watchers ──────────────────────────────────────────────────────── */
+
+/* Watcher toggle button — ProspectCard, Just Listed column */
+.watcher-toggle {
+  display: inline-flex; align-items: center;
+  background: transparent; border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 4px; padding: 3px 5px;
+  cursor: pointer; color: var(--text-muted);
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.watcher-toggle:hover { border-color: var(--gold); color: var(--gold); }
+.watcher-toggle--active {
+  background: rgba(200,169,110,0.15);
+  border-color: rgba(200,169,110,0.5);
+  color: var(--gold);
+}
+.watcher-toggle:disabled { opacity: 0.4; cursor: default; }
+
+/* Watchers section — EventGroup, Just Sold column */
+.watchers-section {
+  background: rgba(200,169,110,0.06);
+  border: 1px solid rgba(200,169,110,0.2);
+  border-radius: 6px; margin: 6px 0 10px; padding: 6px 8px;
+}
+.watchers-header {
+  display: flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px;
+  font-weight: 700; letter-spacing: 0.08em;
+  color: var(--gold); margin-bottom: 6px; text-transform: uppercase;
+}

@@ -506,13 +506,15 @@ function TierSection({ tier, contacts, token, onLogged, activeContactId, default
 }
 
 // ── Prospect Card (Just Sold / Just Listed contacts) ───────────────────────
-function ProspectCard({ contact, onLogged, token }) {
+function ProspectCard({ contact, onLogged, token, eventType, eventAddress }) {
   const [localOutcome, setLocalOutcome] = useState(contact.outcome || null);
   const [logging, setLogging] = useState(false);
   const [showFollowUp, setShowFollowUp] = useState(false);
   const [followUpDays, setFollowUpDays] = useState(1);
   const [followUpNote, setFollowUpNote] = useState('');
   const [savingFollowUp, setSavingFollowUp] = useState(false);
+  const [watching, setWatching]     = useState(!!contact.watching);
+  const [watchPending, setWatchPending] = useState(false);
 
   const logCall = useCallback(async (outcome) => {
     setLogging(true);
@@ -555,6 +557,19 @@ function ProspectCard({ contact, onLogged, token }) {
     finally { setSavingFollowUp(false); }
   }, [contact, token, followUpNote, followUpDays, localOutcome]);
 
+  const toggleWatch = useCallback(async () => {
+    if (!contact.id || !eventAddress) return;
+    setWatchPending(true);
+    try {
+      const method = watching ? 'DELETE' : 'POST';
+      const res = await apiFetch('/api/listing-watchers', token, {
+        method, body: JSON.stringify({ contact_id: contact.id, address: eventAddress })
+      });
+      if (res.ok) setWatching(w => !w);
+    } catch (err) { console.error('toggleWatch', err); }
+    finally { setWatchPending(false); }
+  }, [contact, eventAddress, watching, token]);
+
   const isDimmed = !!localOutcome;
 
   return (
@@ -574,6 +589,16 @@ function ProspectCard({ contact, onLogged, token }) {
                 <MessageSquare size={11} />
               </a>
             </>
+          )}
+          {eventType === 'listing' && contact.id && (
+            <button
+              className={`watcher-toggle${watching ? ' watcher-toggle--active' : ''}`}
+              onClick={e => { e.stopPropagation(); toggleWatch(); }}
+              disabled={watchPending}
+              title={watching ? 'Remove result watcher' : 'Mark as wants result update'}
+            >
+              <Bell size={11} />
+            </button>
           )}
         </div>
       </div>
@@ -633,6 +658,7 @@ function EventGroup({ alert, token, accentColor, defaultExpanded }) {
   const [calledMap, setCalledMap] = useState({});
 
   const contacts = alert.topContacts || [];
+  const watchers = alert.type === 'sold' ? (alert.watchers || []) : [];
   const initialCount = Math.min(10, contacts.length);
   const visibleContacts = showMore ? contacts : contacts.slice(0, initialCount);
   const calledCount = Object.keys(calledMap).length;
@@ -667,12 +693,32 @@ function EventGroup({ alert, token, accentColor, defaultExpanded }) {
       </div>
       {expanded && (
         <div className="event-group-cards">
+          {watchers.length > 0 && (
+            <div className="watchers-section">
+              <div className="watchers-header">
+                <Bell size={10} />
+                <span>WANTS RESULT ({watchers.length})</span>
+              </div>
+              {watchers.map((w, i) => (
+                <ProspectCard
+                  key={`watcher-${w.id || i}`}
+                  contact={w}
+                  token={token}
+                  onLogged={handleLogged}
+                  eventType="sold"
+                  eventAddress={alert.address}
+                />
+              ))}
+            </div>
+          )}
           {visibleContacts.map((c, i) => (
             <ProspectCard
               key={c.id || c.name || i}
               contact={c}
               token={token}
               onLogged={handleLogged}
+              eventType={alert.type}
+              eventAddress={alert.address}
             />
           ))}
           {!showMore && contacts.length > initialCount && (

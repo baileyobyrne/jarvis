@@ -46,6 +46,24 @@ let _agentboxAddrSet = null;   // Set<normalizedAddr>              — addresses
 let _cacheTs         = 0;
 const CACHE_TTL      = 60 * 60 * 1000; // 1 hour
 
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT  = process.env.TELEGRAM_CHAT_ID;
+
+function sendTelegramMessage(text) {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT) return Promise.resolve();
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ chat_id: TELEGRAM_CHAT, text, parse_mode: 'HTML' });
+    const req = https.request({
+      hostname: 'api.telegram.org',
+      path:     `/bot${TELEGRAM_TOKEN}/sendMessage`,
+      method:   'POST',
+      headers:  { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+    }, resolve);
+    req.on('error', err => console.error('[sendTelegramMessage]', err.message));
+    req.write(body); req.end();
+  });
+}
+
 // Normalise an address string to a canonical form for dedup (strips suburb, abbreviates street types)
 function normalizeAddrForDedup(addr) {
   return (addr || '').toUpperCase()
@@ -544,14 +562,56 @@ app.get('/api/alerts', (req, res) => {
       }
     }
 
-    // Inject outcome into each topContact (null if never called)
-    const enriched = alerts.map(alert => ({
-      ...alert,
-      topContacts: (alert.topContacts || []).map(c => ({
-        ...c,
-        outcome: c.id ? (outcomeMap[String(c.id)] || null) : null
-      }))
-    }));
+    // Watching flags for listing contacts (Bell icon state)
+    const listingAddrs = alerts.filter(a => a.type === 'listing').map(a => normalizeAddrForDedup(a.address));
+    const watchingSet = new Set();
+    if (listingAddrs.length > 0) {
+      const ph = listingAddrs.map(() => '?').join(',');
+      db.prepare(`SELECT contact_id, address FROM listing_watchers WHERE address IN (${ph})`)
+        .all(...listingAddrs)
+        .forEach(r => watchingSet.add(`${r.contact_id}|${r.address}`));
+    }
+
+    // Watcher call-back list for sold events
+    const soldAddrs = alerts.filter(a => a.type === 'sold').map(a => normalizeAddrForDedup(a.address));
+    const soldWatchersMap = new Map();
+    if (soldAddrs.length > 0) {
+      const ph = soldAddrs.map(() => '?').join(',');
+      db.prepare(`
+        SELECT lw.contact_id, lw.address AS norm_addr, lw.added_at,
+               c.name, c.mobile, c.address AS contact_address
+        FROM listing_watchers lw
+        LEFT JOIN contacts c ON c.id = lw.contact_id
+        WHERE lw.address IN (${ph})
+      `).all(...soldAddrs).forEach(r => {
+        if (!soldWatchersMap.has(r.norm_addr)) soldWatchersMap.set(r.norm_addr, []);
+        soldWatchersMap.get(r.norm_addr).push({
+          id: r.contact_id, name: r.name || r.contact_id,
+          mobile: r.mobile || '', address: r.contact_address || '',
+          watchedAt: r.added_at, isWatcher: true,
+          outcome: outcomeMap[r.contact_id] || null,
+        });
+      });
+    }
+
+    // Inject outcome + watcher data into each alert
+    const enriched = alerts.map(alert => {
+      const normAddr = normalizeAddrForDedup(alert.address);
+      const watcherIds = new Set((soldWatchersMap.get(normAddr) || []).map(w => w.id));
+      const enrichedContacts = (alert.topContacts || [])
+        .filter(c => !watcherIds.has(c.id))   // don't duplicate watcher in topContacts
+        .map(c => ({
+          ...c,
+          outcome:  c.id ? (outcomeMap[String(c.id)] || null) : null,
+          watching: alert.type === 'listing' && c.id
+                      ? watchingSet.has(`${c.id}|${normAddr}`) : undefined,
+        }));
+      return {
+        ...alert,
+        topContacts: enrichedContacts,
+        watchers: alert.type === 'sold' ? (soldWatchersMap.get(normAddr) || []) : undefined,
+      };
+    });
 
     res.json([...enriched].reverse());
   } catch (e) {
@@ -1506,6 +1566,10 @@ app.post('/api/market-events/manual', requireAuth, async (req, res) => {
            property_type || null, JSON.stringify(topContacts));
     const newEventId = insertResult.lastInsertRowid;
 
+    if (type === 'sold') {
+      notifyWatchersOnSold(normalizeAddrForDedup(normAddress)).catch(console.error);
+    }
+
     // 4. Rebuild listing-alerts.json entry — street-part dedup to avoid duplicates
     try {
       const normStreetPart = normAddress.split(',')[0].trim();
@@ -1608,6 +1672,10 @@ app.patch('/api/market-events/:id', requireAuth, async (req, res) => {
            property_type !== undefined ? (property_type || null) : existing.property_type,
            JSON.stringify(topContacts), id);
 
+    if (newType === 'sold' && existing.type !== 'sold') {
+      notifyWatchersOnSold(normalizeAddrForDedup(normAddress)).catch(console.error);
+    }
+
     // Update listing-alerts.json too
     try {
       if (fs.existsSync(ALERTS_FILE)) {
@@ -1627,6 +1695,47 @@ app.patch('/api/market-events/:id', requireAuth, async (req, res) => {
     console.error('[PATCH /api/market-events/:id]', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+async function notifyWatchersOnSold(normAddress) {
+  const watchers = db.prepare(`
+    SELECT lw.contact_id, c.name, c.mobile
+    FROM listing_watchers lw
+    LEFT JOIN contacts c ON c.id = lw.contact_id
+    WHERE lw.address = ? AND lw.notified = 0
+  `).all(normAddress);
+  if (watchers.length === 0) return;
+
+  const lines = watchers.map(w => `• ${w.name || w.contact_id}${w.mobile ? ' — ' + w.mobile : ''}`);
+  await sendTelegramMessage(
+    `🔔 <b>WATCHERS TO CALL — ${normAddress} SOLD</b>\n\n` +
+    `${watchers.length} contact${watchers.length > 1 ? 's' : ''} asked for the result:\n` +
+    lines.join('\n') + `\n\nCall them back with the sale news!`
+  );
+  db.prepare(`UPDATE listing_watchers SET notified=1, notified_at=datetime('now') WHERE address=? AND notified=0`)
+    .run(normAddress);
+  console.log(`[notifyWatchersOnSold] ${watchers.length} watchers notified for ${normAddress}`);
+}
+
+// POST /api/listing-watchers — mark a contact as wanting the result of a listing
+app.post('/api/listing-watchers', requireAuth, (req, res) => {
+  try {
+    const { contact_id, address } = req.body;
+    if (!contact_id || !address) return res.status(400).json({ error: 'contact_id and address required' });
+    db.prepare('INSERT OR IGNORE INTO listing_watchers (contact_id, address) VALUES (?, ?)')
+      .run(String(contact_id), normalizeAddrForDedup(address));
+    res.json({ ok: true, watching: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/listing-watchers', requireAuth, (req, res) => {
+  try {
+    const { contact_id, address } = req.body;
+    if (!contact_id || !address) return res.status(400).json({ error: 'contact_id and address required' });
+    db.prepare('DELETE FROM listing_watchers WHERE contact_id = ? AND address = ?')
+      .run(String(contact_id), normalizeAddrForDedup(address));
+    res.json({ ok: true, watching: false });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // DELETE /api/market-events/:id — remove a market event
