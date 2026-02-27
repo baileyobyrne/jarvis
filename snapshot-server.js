@@ -2025,8 +2025,8 @@ app.get('/api/search', requireAuth, (req, res) => {
         c.tenure_years, c.occupancy, c.contact_class,
         COALESCE(c.mobile, p.pf_phone) AS contact_mobile,
         lc.last_called_at, lc.last_outcome, lc.last_note,
-        COALESCE(c.propensity_score, 0)             AS _score,
-        p.suburb || ' ' || p.street_name            AS _sort
+        COALESCE(c.propensity_score, 0)                                                    AS _score,
+        printf('%06d', CAST(p.address AS INTEGER)) || ' ' || p.street_name || ' ' || COALESCE(p.street_number, '') AS _sort
       FROM properties p
       LEFT JOIN contacts c ON p.contact_id = c.id
       LEFT JOIN (${callLogSubq}) lc ON c.id = lc.contact_id
@@ -2036,8 +2036,8 @@ app.get('/api/search', requireAuth, (req, res) => {
 
       SELECT
         NULL AS property_id,
-        c.address, NULL AS street_number, NULL AS street_name,
-        COALESCE(c.suburb, '') AS suburb,
+        UPPER(c.address) AS address, NULL AS street_number, NULL AS street_name,
+        UPPER(COALESCE(c.suburb, '')) AS suburb,
         CAST(c.beds AS INTEGER) AS beds,
         CAST(c.baths AS INTEGER) AS baths,
         CAST(c.cars AS INTEGER) AS cars,
@@ -2052,8 +2052,8 @@ app.get('/api/search', requireAuth, (req, res) => {
         c.tenure_years, c.occupancy, c.contact_class,
         c.mobile AS contact_mobile,
         lc.last_called_at, lc.last_outcome, lc.last_note,
-        COALESCE(c.propensity_score, 0)                          AS _score,
-        COALESCE(c.suburb, '') || ' ' || COALESCE(c.address, '') AS _sort
+        COALESCE(c.propensity_score, 0)                                                              AS _score,
+        printf('%06d', CAST(c.address AS INTEGER)) || ' ' || UPPER(COALESCE(c.address, '')) AS _sort
       FROM contacts c
       LEFT JOIN (${callLogSubq}) lc ON c.id = lc.contact_id
       ${unlinkedWhere}

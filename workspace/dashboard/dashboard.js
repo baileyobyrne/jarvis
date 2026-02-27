@@ -1737,13 +1737,12 @@ function SearchCard({ prop, token, onAddedToPlan }) {
       {/* Owner + phone line */}
       <div className="search-card-owner-row">
         <span className="search-card-owner">{displayName}</span>
-        {prop.do_not_call ? (
-          <span className="search-chip search-chip--dnc">DNCR</span>
-        ) : phone ? (
+        {prop.do_not_call && <span className="search-chip search-chip--dnc">DNCR</span>}
+        {phone && (
           <a className="search-card-phone" href={`tel:${phone}`}>
             <Phone size={10} />{phone}
           </a>
-        ) : null}
+        )}
         {prop.propensity_score > 0 && (
           <span className="search-chip search-chip--score" style={{ color: scoreColor, borderColor: scoreColor }}>
             {fmtScore(prop.propensity_score)}
