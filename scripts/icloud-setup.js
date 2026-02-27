@@ -63,7 +63,8 @@ async function main() {
       headers: HEADERS,
       data:    propfindPrincipal,
     });
-    principalPath = extractHref(r1.data);
+    const principalMatch = r1.data.match(/<[^:>]*:?current-user-principal[^>]*>\s*<[^:>]*:?href[^>]*>\s*([^\s<]+)/i);
+    principalPath = principalMatch ? principalMatch[1].trim() : null;
     if (!principalPath) throw new Error('Could not find current-user-principal in response');
     console.log('OK Principal path:', principalPath);
   } catch (e) {
@@ -92,7 +93,8 @@ async function main() {
       headers: HEADERS,
       data:    propfindHome,
     });
-    const homePath = extractHref(r2.data);
+    const homeMatch = r2.data.match(/<[^:>]*:?calendar-home-set[^>]*>\s*<[^:>]*:?href[^>]*>\s*([^\s<]+)/i);
+    const homePath = homeMatch ? homeMatch[1].trim() : null;
     if (!homePath) throw new Error('Could not find calendar-home-set in response');
     homeUrl = homePath.startsWith('http') ? homePath : 'https://caldav.icloud.com' + homePath;
     console.log('OK Calendar home:', homeUrl);
