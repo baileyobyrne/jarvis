@@ -6,7 +6,9 @@ Technical architecture for an autonomous real estate monitoring and prospecting 
    - **Trigger:** Cron job 3× daily — approx. 7am, 12pm, 5pm AEDT (21:00, 02:00, 07:00 UTC). *(Previously documented as "every 15 minutes" — corrected to match `cron/jobs.json`.)*
    - **Function:** Monitors Gmail for REA, Domain, and Homely alerts[cite: 1569, 2393]. Also parses CoreLogic/RP Data forwarded emails.
    - **Logic:** Applies a 1.5km geofence and Haversine proximity scoring to AgentBox contacts[cite: 1569, 2394]. CoreLogic rentals write `occupancy: "Investor"` back to the shadow DB.
-   - **Output:** Writes up to 30 scored neighbours per market event to SQLite (`market_events`, `contacts`). Fires a concise heads-up to `@willoughby_monitor_bot` Telegram.
+   - **Output:** All email sources (CoreLogic, REA/Domain, Weekly Wrap, Proping) funnel through `processMarketEvent(details, rpMap, opts)` — the single save path. Steps: farm gate → score 20 contacts → write `market_events` → write `listing-alerts.json` (listing/sold only) → optional individual Telegram. CoreLogic and Proping skip individual Telegram (Proping sends a consolidated digest instead). `opts.sendTelegram = true` for REA/Domain/Weekly Wrap.
+   - **Call board vs Market data sources (CRITICAL):** `listing-alerts.json` is the ONLY data source for the Just Sold/Just Listed call board columns (`GET /api/alerts`). `market_events` SQLite feeds the Market page only. An event that only reaches `market_events` (without also writing `listing-alerts.json`) will appear in Market but NOT in the call board. Always use `processMarketEvent()` to guarantee both are written.
+   - **`processProping()` signature (updated 2026-02-28):** `processProping(events, receivedDate, testMode, rpMap = new Map())` — rpMap is now 4th param. Each Proping event now routes through `processMarketEvent()` for full contact scoring and `listing-alerts.json` write.
 
 2. **Pipeline B (Proactive):** `daily-planner.js`
    - **Trigger:** Cron job Mon–Fri at 7:00 AM AEDT[cite: 1599, 2397] (`0 20 * * 1-5` UTC).
@@ -110,6 +112,9 @@ The Notion Command Center will be replaced by a self-hosted web dashboard on the
 - **Express route order:** Static sub-paths (e.g. `/api/buyer-profiles/matches/recent`) MUST be registered before parameterised routes (`/api/buyer-profiles/:id`) or Express will capture them as `:id`.
 - **Dashboard CSS undefined tokens:** `--bg-card` and `--border` are NOT defined in dashboard.css — using them silently falls back to transparent/default. Use defined tokens: `--bg-raised`, `--bg-surface`, `--border-subtle`, `--border-gold`.
 - **`GET /api/market` filter params (added 2026-02-27):** `?property_type=house|unit|townhouse` and `?sort=newest|oldest|price_high|price_low` — validated against VALID_PROPERTY_TYPES/VALID_SORTS whitelists.
+- **Farm area canonical filter:** `!/willoughby/i.test(address)` — covers Willoughby, North Willoughby, Willoughby East (all contain "Willoughby"). Applied per-property inside `processMarketEvent()` and as a safety net in `GET /api/alerts`. Do NOT rely on `isWilloughbyArea()` for per-property filtering — it checks the full email body, not individual addresses.
+- **Email digest multi-suburb gotcha:** REA/Domain digest emails can contain addresses from multiple suburbs. `isWilloughbyArea()` passes if "Willoughby" appears anywhere in the email body, so Northbridge/Castlecrag addresses in the same digest will be parsed. Farm gate is enforced per-property inside `processMarketEvent()`.
+- **`better-sqlite3` for ad-hoc scripts:** `require('/root/.openclaw/node_modules/better-sqlite3')` — NOT in `agentbox-willoughby/node_modules/`.
 
 ## 🔒 Security Notes
 - **SSH:** Password authentication disabled (Feb 2026). Key-only login — key fingerprint `SHA256:/EG3Acc/UmSHIR157ZJU/IzYY8/3pPWVdGf+K7vlHXk`. `iptables-persistent` installed; rules in `/etc/iptables/rules.v4`.
@@ -134,5 +139,6 @@ Plugins installed and their primary use in this system:
 | Playground | Sandbox testing of new Express endpoints and SQLite queries before production |
 
 ## 📍 Geographic Focus
-- **Primary Suburb:** Willoughby (NSW 2068)[cite: 1552, 1704].
-- **Coverage:** North Willoughby, Willoughby East, Castlecrag, Middle Cove, Castle Cove, Naremburn, Chatswood, Artarmon[cite: 2092, 2397].
+- **Primary Suburb:** Willoughby (NSW 2068).
+- **Call board farm (Just Sold/Just Listed):** Willoughby, North Willoughby, Willoughby East only — enforced by `/willoughby/i` filter in `processMarketEvent()` and `GET /api/alerts`.
+- **Coverage (Market page + scoring pool):** North Willoughby, Willoughby East, Castlecrag, Middle Cove, Castle Cove, Naremburn, Chatswood, Artarmon.

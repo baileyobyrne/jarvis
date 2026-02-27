@@ -718,6 +718,9 @@ app.get('/api/alerts', (req, res) => {
     if (!fs.existsSync(ALERTS_FILE)) return res.json([]);
     let alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
 
+    // Only show events in the Willoughby farm area (Willoughby, North Willoughby, Willoughby East)
+    alerts = alerts.filter(a => /willoughby/i.test(a.address || ''));
+
     // ── Cross-event contact deduplication ─────────────────────────────────────
     // Each contact ID appears in at most one event — the one where they score highest.
     const bestEvent = new Map(); // contactId → { eventIdx, score }

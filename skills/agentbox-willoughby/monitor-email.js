@@ -451,27 +451,23 @@ function buildPropingTelegramSummary(events, receivedDate) {
  * @param {boolean} [testMode]    - If true, print Telegram message instead of sending.
  * @returns {number} Number of net-new rows written to SQLite.
  */
-async function processProping(propingEvents, receivedDate, testMode) {
+async function processProping(propingEvents, receivedDate, testMode, rpMap = new Map()) {
   if (propingEvents.length === 0) {
     console.log('  → [Proping] No events to process.');
     return 0;
   }
 
-  const beforeCount = db.prepare('SELECT COUNT(*) AS c FROM market_events WHERE source = ?')
-    .get('Proping').c;
-
+  // Route every Proping event through the unified pipeline (no individual Telegram —
+  // the consolidated digest below handles that for the whole batch).
+  let newRows = 0;
   for (const event of propingEvents) {
-    writeMarketEvent(event);
-    console.log(`  → [Proping] ${event.type.toUpperCase()} @ ${event.address}`);
+    const saved = await processMarketEvent(event, rpMap, { sendTelegram: false });
+    if (saved) newRows++;
   }
+  console.log(`  → [Proping] ${newRows} new events processed.`);
 
-  const afterCount = db.prepare('SELECT COUNT(*) AS c FROM market_events WHERE source = ?')
-    .get('Proping').c;
-  const newRows = afterCount - beforeCount;
-  console.log(`  → [Proping] ${newRows} new rows written to market_events.`);
-
+  // Send consolidated Telegram digest for the full batch
   const summary = buildPropingTelegramSummary(propingEvents, receivedDate);
-
   if (testMode) {
     console.log('\n[test-proping] Telegram summary (NOT sent in test mode):');
     console.log('─'.repeat(55));
@@ -708,18 +704,27 @@ async function buildScoredContacts(address, details, rpMap, minCount = 20) {
 // Export for use by snapshot-server.js manual event endpoint
 module.exports = { buildScoredContacts };
 
-// Full pipeline for a single CoreLogic address:
-// proximity match → score → listing-alerts.json + SQLite market_events
-async function processCoreLogicListing(details, rpMap) {
+// ─── UNIFIED MARKET EVENT PIPELINE ────────────────────────────────────────────
+// Every source (CoreLogic, REA/Domain, Weekly Wrap, Proping) funnels through here.
+// Guarantees consistent data across all paths:
+//   farm check → score contacts → write market_events → write listing-alerts.json
+//   → optional individual Telegram notification.
+//
+// opts.sendTelegram (default false):
+//   true  = send individual Telegram alert per event (REA/Domain, Weekly Wrap)
+//   false = silent save only (CoreLogic, Proping — those handle Telegram separately)
+async function processMarketEvent(details, rpMap = new Map(), opts = {}) {
+  const { sendTelegram = false } = opts;
   const address = details.address;
-  const scoredContacts = await buildScoredContacts(address, details, rpMap, 20);
 
-  if (scoredContacts.length === 0) {
-    console.log(`  → No scored contacts found near ${address}`);
-    writeMarketEvent(details, []);
-    return;
+  // 1. Farm area gate — only Willoughby, North Willoughby, Willoughby East
+  if (!/willoughby/i.test(address)) {
+    console.log(`  → Skipped: Out of farm area: ${address}`);
+    return false;
   }
 
+  // 2. Score contacts
+  const scoredContacts = await buildScoredContacts(address, details, rpMap, 20);
   const topContacts = scoredContacts.map(c => ({
     id:       c.id       || '',
     name:     c.name,
@@ -728,37 +733,66 @@ async function processCoreLogicListing(details, rpMap) {
     distance: c.distance ? Math.round(c.distance) : null
   }));
 
-  // Write to listing-alerts.json for the dashboard
-  try {
-    const ALERTS_FILE = '/root/.openclaw/workspace/listing-alerts.json';
-    const newEntry = {
-      detectedAt:   new Date().toISOString(),
-      type:         details.type,
-      address,
-      price:        details.price        || '',
-      beds:         details.beds         || '',
-      baths:        details.baths        || '',
-      cars:         details.cars         || '',
-      propertyType: details.propertyType || '',
-      source:       'CoreLogic',
-      topContacts
-    };
-    let alerts = [];
-    if (fs.existsSync(ALERTS_FILE)) {
-      try { alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8')); } catch (_) { alerts = []; }
+  // 3. Write to SQLite market_events
+  writeMarketEvent(details, topContacts);
+
+  // 4. Write to listing-alerts.json (listing and sold events only)
+  if (details.type === 'listing' || details.type === 'sold') {
+    try {
+      const ALERTS_FILE = '/root/.openclaw/workspace/listing-alerts.json';
+      const newEntry = {
+        detectedAt:   new Date().toISOString(),
+        type:         details.type,
+        address,
+        price:        details.price        || '',
+        beds:         details.beds         || '',
+        baths:        details.baths        || '',
+        cars:         details.cars         || '',
+        propertyType: details.propertyType || '',
+        source:       details.source       || '',
+        topContacts
+      };
+      let alerts = [];
+      if (fs.existsSync(ALERTS_FILE)) {
+        try { alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8')); } catch (_) { alerts = []; }
+      }
+      const idx = alerts.findIndex(a => a.address === address && a.type === details.type);
+      if (idx >= 0) alerts[idx] = newEntry; else alerts.push(newEntry);
+      alerts = alerts.slice(-20);
+      fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
+    } catch (e) {
+      console.error('  → Alert log write failed:', e.message);
     }
-    // Replace existing entry for same address+type, or append
-    const idx = alerts.findIndex(a => a.address === address && a.type === details.type);
-    if (idx >= 0) alerts[idx] = newEntry; else alerts.push(newEntry);
-    alerts = alerts.slice(-20);
-    fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
-    console.log(`  ✅ CoreLogic → dashboard alert: ${scoredContacts.length} contacts for ${address}`);
-  } catch (e) {
-    console.error('  → Alert log write failed:', e.message);
   }
 
-  // Write to SQLite market_events (Part B — CoreLogic track)
-  writeMarketEvent(details, topContacts);
+  // 5. Optional individual Telegram notification
+  if (sendTelegram) {
+    const isSold = details.type === 'sold';
+    const propParts = [
+      details.beds   ? `${details.beds}bed`   : null,
+      details.baths  ? `${details.baths}bath`  : null,
+      details.cars   ? `${details.cars}car`    : null,
+      details.propertyType || null
+    ].filter(Boolean).join(' · ');
+    const priceStr = details.price ? `💰 ${details.price}` : '💰 Price withheld';
+    let commentary;
+    if (isSold) {
+      const cat = categorizePropertyType(details.propertyType || '');
+      commentary = cat === 'Unit'
+        ? `Unit comp in the pocket — any similar owner nearby who's been sitting on it should be getting a call this week.`
+        : `Strong house comp — opens the conversation with long-tenure owners in the street. Dashboard has the ranked list.`;
+    } else {
+      commentary = `Fresh listing on the market — buyers who miss out are your best prospective vendors. Keep an eye on the campaign.`;
+    }
+    const alertMsg = `${isSold ? '🔨' : '🏠'} <b>${isSold ? 'SOLD' : 'NEW LISTING'} — ${address}</b>\n\n` +
+      `${priceStr}\n` +
+      (propParts ? `🏠 ${propParts}\n` : '') +
+      `\n💡 ${commentary}`;
+    await sendTelegram(alertMsg);
+  }
+
+  console.log(`  ✅ ${details.type.toUpperCase()} @ ${address} [${details.source}] — ${topContacts.length} contacts`);
+  return true;
 }
 
 // ─── ROUTING ─────────────────────────────────────────────────────────────────
@@ -1031,7 +1065,7 @@ async function checkEmails() {
       // ── PROPING TRACK: batch process entire digest, one Telegram summary ────
       if (detailsList[0]?.source === 'Proping') {
         const receivedDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Australia/Sydney' });
-        await processProping(detailsList, receivedDate, false);
+        await processProping(detailsList, receivedDate, false, rpMap);
         found += detailsList.length;
         fs.writeFileSync(SEEN_FILE, JSON.stringify(seen, null, 2));
         continue;
@@ -1051,87 +1085,12 @@ async function checkEmails() {
         }
         seen.addresses.push(dedupKey);
 
-        // ── CORELOGIC TRACK: bypass Telegram, write to alerts JSON + SQLite ──
-        if (details.source === 'CoreLogic') {
-          await processCoreLogicListing(details, rpMap);
-          found++;
-          fs.writeFileSync(SEEN_FILE, JSON.stringify(seen, null, 2));
-          continue;
-        }
-
-        // ── NON-CORELOGIC TRACK: AI strategies + Telegram + JSON + SQLite ───
-        const scoredForAlert = await buildScoredContacts(details.address, details, rpMap, 20);
-
-        // Build topContacts with id/address for JSON and SQLite writes
-        const topContacts = scoredForAlert.map(c => ({
-          id:       c.id       || '',
-          name:     c.name,
-          mobile:   c.mobile   || '',
-          address:  c.address  || '',
-          distance: c.distance ? Math.round(c.distance) : null
-        }));
-
-        // Send Jarvis-style contextual alert to Telegram (no contact list — that's the dashboard's job)
-        {
-          const isSold = details.type === 'sold';
-          const propParts = [
-            details.beds   ? `${details.beds}bed`   : null,
-            details.baths  ? `${details.baths}bath`  : null,
-            details.cars   ? `${details.cars}car`    : null,
-            details.propertyType || null
-          ].filter(Boolean).join(' · ');
-          const priceStr = details.price ? `💰 ${details.price}` : '💰 Price withheld';
-          let commentary;
-          if (isSold) {
-            const cat = categorizePropertyType(details.propertyType || '');
-            if (cat === 'Unit') {
-              commentary = `Unit comp in the pocket — any similar owner nearby who's been sitting on it should be getting a call this week.`;
-            } else {
-              commentary = `Strong house comp — opens the conversation with long-tenure owners in the street. Dashboard has the ranked list.`;
-            }
-          } else {
-            commentary = `Fresh listing on the market — buyers who miss out are your best prospective vendors. Keep an eye on the campaign.`;
-          }
-          const alertMsg = `${isSold ? '🔨' : '🏠'} <b>${isSold ? 'SOLD' : 'NEW LISTING'} — ${details.address}</b>\n\n` +
-            `${priceStr}\n` +
-            (propParts ? `🏠 ${propParts}\n` : '') +
-            `\n💡 ${commentary}`;
-          await sendTelegram(alertMsg);
-        }
-
-        // Log alert to listing-alerts.json for the dashboard
-        try {
-          const ALERTS_FILE = '/root/.openclaw/workspace/listing-alerts.json';
-          const newEntry = {
-            detectedAt:   new Date().toISOString(),
-            type:         details.type,
-            address:      details.address,
-            price:        details.price        || '',
-            beds:         details.beds         || '',
-            baths:        details.baths        || '',
-            cars:         details.cars         || '',
-            propertyType: details.propertyType || '',
-            source:       details.source,
-            topContacts
-          };
-          let alerts = [];
-          if (fs.existsSync(ALERTS_FILE)) {
-            try { alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8')); } catch (_) { alerts = []; }
-          }
-          // Replace existing entry for same address+type, or append
-          const idx = alerts.findIndex(a => a.address === details.address && a.type === details.type);
-          if (idx >= 0) alerts[idx] = newEntry; else alerts.push(newEntry);
-          alerts = alerts.slice(-20);
-          fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
-        } catch (e) {
-          console.error('  → Alert log write failed (non-fatal):', e.message);
-        }
-
-        // Write to SQLite market_events (Part B — non-CoreLogic track)
-        writeMarketEvent(details, topContacts);
-
-        console.log(`  ✅ Alert sent: ${details.address} [${details.type}] via ${details.source}`);
-        found++;
+        // All sources route through the unified pipeline.
+        // CoreLogic is high-volume territory data — skip individual Telegram.
+        // REA/Domain/Weekly Wrap get individual Telegram notifications.
+        const sendTelegram = details.source !== 'CoreLogic';
+        const saved = await processMarketEvent(details, rpMap, { sendTelegram });
+        if (saved) found++;
 
         fs.writeFileSync(SEEN_FILE, JSON.stringify(seen, null, 2));
       }
