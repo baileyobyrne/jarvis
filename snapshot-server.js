@@ -1111,6 +1111,31 @@ app.get('/api/contacts/search', requireAuth, (req, res) => {
   }
 });
 
+// ── POST /api/contacts — create new contact ─────────────────────────────────
+app.post('/api/contacts', requireAuth, (req, res) => {
+  const { name, mobile, address, suburb, beds, baths, property_type, do_not_call } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
+
+  const id = 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  db.prepare(`
+    INSERT INTO contacts (id, name, mobile, address, suburb, beds, baths, property_type, do_not_call, source, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', datetime('now','localtime'), datetime('now','localtime'))
+  `).run(
+    id,
+    name.trim(),
+    (mobile || '').trim(),
+    (address || '').trim(),
+    (suburb || '').trim(),
+    (beds || '').toString().trim(),
+    (baths || '').toString().trim(),
+    (property_type || '').trim(),
+    do_not_call ? 1 : 0
+  );
+
+  const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(id);
+  res.json({ ok: true, contact });
+});
+
 // PATCH /api/contacts/:id — edit contact fields
 app.patch('/api/contacts/:id', requireAuth, (req, res) => {
   try {

@@ -733,6 +733,80 @@ function EditContactModal({ contact, token, onSaved, onClose }) {
   );
 }
 
+// ── New Contact Modal ────────────────────────────────────────────────────────
+function NewContactModal({ token, onCreated, onClose }) {
+  const [form, setForm]   = useState({ name:'', mobile:'', address:'', suburb:'', beds:'', baths:'', property_type:'House', do_not_call: false });
+  const [saving, setSaving] = useState(false);
+  const [error,  setError]  = useState(null);
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const handleSave = useCallback(async () => {
+    if (!form.name.trim()) { setError('Name is required'); return; }
+    setSaving(true); setError(null);
+    try {
+      const res = await apiFetch('/api/contacts', token, {
+        method: 'POST',
+        body: JSON.stringify({ ...form, do_not_call: form.do_not_call ? 1 : 0 })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Save failed');
+      onCreated(data.contact);
+      onClose();
+    } catch (e) { setError(e.message); }
+    finally { setSaving(false); }
+  }, [form, token, onCreated, onClose]);
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">New Contact</span>
+          <button className="modal-close" onClick={onClose}><X size={14} /></button>
+        </div>
+        <div className="modal-body">
+          {[['Name *', 'name', 'text', ''], ['Mobile', 'mobile', 'text', '04xx xxx xxx'],
+            ['Address', 'address', 'text', ''], ['Suburb', 'suburb', 'text', '']
+          ].map(([label, key, type, ph]) => (
+            <div className="edit-field" key={key}>
+              <label className="edit-label">{label}</label>
+              <input className="edit-input" type={type} value={form[key]}
+                placeholder={ph} onChange={e => set(key, e.target.value)} />
+            </div>
+          ))}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            {[['Beds', 'beds'], ['Baths', 'baths']].map(([label, key]) => (
+              <div className="edit-field" key={key}>
+                <label className="edit-label">{label}</label>
+                <input className="edit-input" type="number" min="0" max="10"
+                  value={form[key]} onChange={e => set(key, e.target.value)} />
+              </div>
+            ))}
+          </div>
+          <div className="edit-field">
+            <label className="edit-label">Property Type</label>
+            <select className="edit-input" value={form.property_type} onChange={e => set('property_type', e.target.value)}>
+              {['House','Unit','Townhouse','Apartment','Land'].map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <div className="edit-field edit-field--inline">
+            <label className="edit-label">Do Not Call</label>
+            <input type="checkbox" className="edit-checkbox" checked={form.do_not_call}
+              onChange={e => set('do_not_call', e.target.checked)} />
+          </div>
+          {error && <div className="edit-error">{error}</div>}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn modal-btn--cancel" onClick={onClose}>Cancel</button>
+          <button className="modal-btn modal-btn--save" onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving\u2026' : 'Add Contact'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Contact Notes Modal ─────────────────────────────────────────────────────
 const DURATION_OPTIONS = [
   { label: '15 min', value: 15 },
@@ -983,6 +1057,7 @@ function CallsPage({ token, onReminderCountChange }) {
   const [topping, setTopping] = useState(false);
   const [mobileCol, setMobileCol] = useState('circle'); // 'circle' | 'sold' | 'listed'
   const [reminders, setReminders] = useState([]);
+  const [showNewContact, setShowNewContact] = useState(false);
 
   useEffect(() => { planRef.current = plan; }, [plan]);
 
@@ -1064,9 +1139,15 @@ function CallsPage({ token, onReminderCountChange }) {
   // ── Column 1: Circle Prospecting ─────────────────────────────────────────
   const circleColumn = (
     <div className="call-col">
-      <div className="call-col-header call-col-header--gold">
+      <div className="call-col-header call-col-header--gold" style={{ display: 'flex', alignItems: 'center' }}>
         <span className="call-col-title">CIRCLE PROSPECTING</span>
         <span className="call-col-badge">{uncalled.length}</span>
+        <button
+          className="topup-btn topup-btn--sm"
+          style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}
+          onClick={() => setShowNewContact(true)}
+          title="Add new contact"
+        ><Plus size={11} /> New</button>
       </div>
       <div className="call-col-body">
         {dueToday.length > 0 && (
@@ -1224,6 +1305,13 @@ function CallsPage({ token, onReminderCountChange }) {
           {listedColumn}
         </div>
       </div>
+      {showNewContact && (
+        <NewContactModal
+          token={token}
+          onCreated={() => { setShowNewContact(false); loadData(); }}
+          onClose={() => setShowNewContact(false)}
+        />
+      )}
     </>
   );
 }
@@ -1966,6 +2054,8 @@ function SearchCard({ prop, token, onAddedToPlan }) {
   const [savingReminder, setSavingReminder] = useState(false);
   const [showHistory, setShowHistory]   = useState(false);
   const [history, setHistory]           = useState(null); // null = not yet loaded
+  const [showEdit,  setShowEdit]        = useState(false);
+  const [showNotes, setShowNotes]       = useState(false);
 
   const contactId   = prop.crm_contact_id;
   const displayName = prop.crm_name || prop.owner_name || 'Unknown Owner';
@@ -2164,6 +2254,16 @@ function SearchCard({ prop, token, onAddedToPlan }) {
             <Bell size={10} /> Reminder
           </button>
         )}
+        {contactId && (
+          <>
+            <button className="search-action-btn" onClick={() => setShowEdit(true)} title="Edit contact">
+              <FileEdit size={10} /> Edit
+            </button>
+            <button className="search-action-btn" onClick={() => setShowNotes(true)} title="Notes & history">
+              <ClipboardList size={10} /> Notes
+            </button>
+          </>
+        )}
       </div>
 
       {/* Inline outcome quick-log */}
@@ -2210,6 +2310,22 @@ function SearchCard({ prop, token, onAddedToPlan }) {
             </button>
           </div>
         </div>
+      )}
+      {showEdit && contactId && (
+        <EditContactModal
+          contact={{ id: contactId, name: prop.crm_name || prop.owner_name || '', mobile: prop.contact_mobile || '', address: prop.address || '', suburb: prop.suburb || '', do_not_call: prop.do_not_call ? 1 : 0 }}
+          token={token}
+          onSaved={() => setShowEdit(false)}
+          onClose={() => setShowEdit(false)}
+        />
+      )}
+      {showNotes && contactId && (
+        <ContactNotesModal
+          contact={{ id: contactId, name: prop.crm_name || prop.owner_name || '', mobile: prop.contact_mobile || '', address: prop.address || '', suburb: prop.suburb || '' }}
+          token={token}
+          prefilledNote={`Search \u2014 ${prop.address || ''} | `}
+          onClose={() => setShowNotes(false)}
+        />
       )}
     </div>
   );
