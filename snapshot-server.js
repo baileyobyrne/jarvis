@@ -1200,7 +1200,7 @@ app.patch('/api/reminders/:id', requireAuth, (req, res) => {
     const existing = db.prepare('SELECT id, sent, completed_at FROM reminders WHERE id = ?').get(id);
     if (!existing) return res.status(404).json({ error: 'not found' });
     if (existing.completed_at) return res.status(409).json({ error: 'cannot edit a completed reminder' });
-    const ALLOWED = ['note', 'fire_at', 'contact_name', 'contact_mobile'];
+    const ALLOWED = ['note', 'fire_at', 'contact_name', 'contact_mobile', 'is_task'];
     const sets = [], vals = [];
     for (const key of ALLOWED) {
       if (req.body[key] !== undefined) {

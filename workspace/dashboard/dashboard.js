@@ -1447,7 +1447,6 @@ function CallsPage({ token, onReminderCountChange }) {
 
   return (
     <>
-      <AgendaWidget token={token} />
       <StatusStrip status={status} planCount={plan.length} calledCount={called.length} />
 
       {/* Mobile column tabs */}
@@ -2094,53 +2093,296 @@ function BuyersPage({ token }) {
 }
 
 // ── Reminders Page ─────────────────────────────────────────────────────────
-function RemindersPage({ token }) {
-  const [reminders, setReminders] = useState([]);
-  const [loading, setLoading] = useState(true);
+function RemindersPage({ token, onReminderCountChange }) {
+  const [reminders, setReminders] = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+  const [showAddModal, setShowAddModal] = React.useState(false);
+  const [addIsTask, setAddIsTask] = React.useState(false);
+  const [editTarget, setEditTarget] = React.useState(null);
+  const [deleteConfirmId, setDeleteConfirmId] = React.useState(null);
 
-  useEffect(() => {
+  const load = React.useCallback(() => {
+    setLoading(true);
     apiFetch('/api/reminders/upcoming', token)
       .then(r => r.ok ? r.json() : [])
-      .then(data => { setReminders(Array.isArray(data) ? data : []); setLoading(false); })
+      .then(data => {
+        setReminders(Array.isArray(data) ? data : []);
+        setLoading(false);
+        if (onReminderCountChange) onReminderCountChange(
+          (Array.isArray(data) ? data : []).filter(r => r.fire_at && !r.is_task).length
+        );
+      })
       .catch(() => setLoading(false));
   }, [token]);
 
-  if (loading) return <div className="loading-state"><div className="spinner" /></div>;
+  React.useEffect(() => { load(); }, [load]);
+
+  const handleComplete = React.useCallback((id) => {
+    apiFetch(`/api/reminders/${id}/complete`, token, { method: 'POST' })
+      .then(r => {
+        if (r.ok) {
+          setReminders(prev => {
+            const next = prev.filter(r => r.id !== id);
+            if (onReminderCountChange) onReminderCountChange(next.filter(r => r.fire_at && !r.is_task).length);
+            return next;
+          });
+        }
+      });
+  }, [token, onReminderCountChange]);
+
+  const handleDelete = React.useCallback((id) => {
+    apiFetch(`/api/reminders/${id}`, token, { method: 'DELETE' })
+      .then(r => {
+        if (r.ok) {
+          setReminders(prev => {
+            const next = prev.filter(r => r.id !== id);
+            if (onReminderCountChange) onReminderCountChange(next.filter(r => r.fire_at && !r.is_task).length);
+            return next;
+          });
+          setDeleteConfirmId(null);
+        }
+      });
+  }, [token, onReminderCountChange]);
+
+  const handleSaved = React.useCallback((savedReminder, isEdit) => {
+    setShowAddModal(false);
+    setEditTarget(null);
+    load();
+  }, [load]);
+
+  // Group reminders by time bucket
+  function groupReminders(items) {
+    const now = new Date();
+    const todayEnd = new Date(); todayEnd.setHours(23,59,59,999);
+    const tomorrowEnd = new Date(todayEnd); tomorrowEnd.setDate(tomorrowEnd.getDate() + 1);
+    const weekEnd = new Date(todayEnd); weekEnd.setDate(weekEnd.getDate() + 7);
+
+    const groups = { overdue: [], today: [], tomorrow: [], this_week: [], later: [], no_date: [] };
+    for (const r of items) {
+      if (!r.fire_at) { groups.no_date.push(r); continue; }
+      const t = new Date(r.fire_at);
+      if (t < now) groups.overdue.push(r);
+      else if (t <= todayEnd) groups.today.push(r);
+      else if (t <= tomorrowEnd) groups.tomorrow.push(r);
+      else if (t <= weekEnd) groups.this_week.push(r);
+      else groups.later.push(r);
+    }
+    return groups;
+  }
+
+  const groups = groupReminders(reminders);
+  const totalCount = reminders.length;
+
+  const GROUP_CONFIG = [
+    { key: 'overdue',   label: 'OVERDUE',   color: 'var(--outcome-notint)' },
+    { key: 'today',     label: 'TODAY',     color: 'var(--gold)' },
+    { key: 'tomorrow',  label: 'TOMORROW',  color: 'var(--text-primary)' },
+    { key: 'this_week', label: 'THIS WEEK', color: 'var(--text-primary)' },
+    { key: 'later',     label: 'LATER',     color: 'var(--text-muted)' },
+    { key: 'no_date',   label: 'TASKS',     color: 'var(--text-muted)' },
+  ];
 
   return (
-    <div className="page-body">
-      {reminders.length === 0 ? (
-        <div className="empty-state">
-          <div className="empty-state-icon"><Bell size={32} /></div>
-          <div className="empty-state-title">No upcoming reminders</div>
-          <div className="empty-state-sub">Set reminders from contact cards on the Calls page</div>
-        </div>
-      ) : (
-        <div className="event-list">
-          {reminders.map((r, i) => (
-            <div className="event-card" key={r.id || i} style={{ animationDelay: `${i * 0.03}s` }}>
-              <div style={{ flexShrink: 0 }}>
-                <Bell size={16} style={{ color: 'var(--gold)', marginTop: 2 }} />
-              </div>
-              <div className="event-body">
-                <div className="event-addr">{r.contact_name || '—'}</div>
-                <div className="event-detail">{r.note || 'No note'}</div>
-                {r.contact_mobile && (
-                  <div className="event-detail" style={{ marginTop: 2 }}>
-                    <a href={`tel:${r.contact_mobile}`} style={{ color: 'var(--text-secondary)' }}>
-                      {r.contact_mobile}
-                    </a>
-                  </div>
-                )}
-              </div>
-              <div className="event-meta">
-                <div>{fmtDate(r.fire_at)}</div>
-                <div style={{ marginTop: 2 }}>{fmtTime(r.fire_at)}</div>
-              </div>
-            </div>
-          ))}
-        </div>
+    <div className="reminders-page">
+      <div className="reminders-toolbar">
+        <button className="rem-add-btn rem-add-task" onClick={() => { setEditTarget(null); setAddIsTask(true); setShowAddModal(true); }}>
+          <Plus size={13} /> Add Task
+        </button>
+        <button className="rem-add-btn rem-add-reminder" onClick={() => { setEditTarget(null); setAddIsTask(false); setShowAddModal(true); }}>
+          <Bell size={13} /> Add Reminder
+        </button>
+        <button className="rem-refresh-btn" onClick={load} title="Refresh">
+          <RefreshCw size={13} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
+        </button>
+        <span className="rem-count">{totalCount} pending</span>
+      </div>
+
+      {loading && <div className="loading-msg">Loading...</div>}
+
+      {!loading && totalCount === 0 && (
+        <div className="empty-state">No pending reminders or tasks.</div>
       )}
+
+      {GROUP_CONFIG.map(({ key, label, color }) => {
+        const items = groups[key];
+        if (items.length === 0) return null;
+        return (
+          <div key={key} className="rem-group">
+            <div className="rem-group-header" style={{ color }}>
+              {label} <span className="rem-group-count">{items.length}</span>
+            </div>
+            {items.map(r => (
+              <div key={r.id} className={`rem-item${r.is_task ? ' rem-item--task' : ''}`}>
+                <button
+                  className="rem-check-btn"
+                  onClick={() => handleComplete(r.id)}
+                  title="Mark complete"
+                >
+                  <div className="rem-check-circle" />
+                </button>
+                <div className="rem-item-body">
+                  {r.contact_name && r.contact_name !== 'Manual Task' && (
+                    <div className="rem-item-contact">{r.contact_name}</div>
+                  )}
+                  <div className="rem-item-note">{r.note}</div>
+                  {r.contact_mobile && (
+                    <a href={`tel:${r.contact_mobile}`} className="rem-item-mobile">
+                      <Phone size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {r.contact_mobile}
+                    </a>
+                  )}
+                </div>
+                {r.fire_at && (
+                  <div className="rem-item-time">{fmtDate(r.fire_at)} {fmtTime(r.fire_at)}</div>
+                )}
+                <div className="rem-item-actions">
+                  <button className="icon-btn" onClick={() => setEditTarget(r)} title="Edit">
+                    <Pencil size={12} />
+                  </button>
+                  {deleteConfirmId === r.id ? (
+                    <>
+                      <button className="icon-btn icon-btn--danger" onClick={() => handleDelete(r.id)}>Yes</button>
+                      <button className="icon-btn" onClick={() => setDeleteConfirmId(null)}>No</button>
+                    </>
+                  ) : (
+                    <button className="icon-btn icon-btn--danger" onClick={() => setDeleteConfirmId(r.id)} title="Delete">
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+
+      {(showAddModal || editTarget) && (
+        <AddEditReminderModal
+          token={token}
+          reminder={editTarget}
+          defaultIsTask={addIsTask}
+          onSaved={handleSaved}
+          onClose={() => { setShowAddModal(false); setEditTarget(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── AddEditReminderModal ────────────────────────────────────────────────────
+function AddEditReminderModal({ token, reminder, defaultIsTask, onSaved, onClose }) {
+  const isEdit = !!reminder;
+  const [isTask, setIsTask] = React.useState(isEdit ? (reminder.is_task === 1) : (defaultIsTask || false));
+  const [note, setNote] = React.useState(isEdit ? reminder.note : '');
+  const [contactName, setContactName] = React.useState(isEdit ? (reminder.contact_name || '') : '');
+  const [contactMobile, setContactMobile] = React.useState(isEdit ? (reminder.contact_mobile || '') : '');
+  const [fireAt, setFireAt] = React.useState(isEdit && reminder.fire_at
+    ? reminder.fire_at.slice(0, 16)
+    : (() => {
+        const pad = n => String(n).padStart(2, '0');
+        const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0);
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T09:00`;
+      })()
+  );
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState('');
+
+  const handleSave = async () => {
+    if (!note.trim()) { setError('Note is required'); return; }
+    if (!isTask && !fireAt) { setError('Date/time is required for reminders'); return; }
+    setSaving(true);
+    setError('');
+    const body = {
+      note: note.trim(),
+      contact_name: contactName.trim() || 'Task',
+      contact_mobile: contactMobile.trim() || null,
+      fire_at: isTask ? (fireAt || undefined) : fireAt,
+      is_task: isTask ? 1 : 0,
+    };
+    const path = isEdit ? `/api/reminders/${reminder.id}` : '/api/reminders';
+    const method = isEdit ? 'PATCH' : 'POST';
+    try {
+      const res = await apiFetch(path, token, { method, body: JSON.stringify(body) });
+      if (!res.ok) {
+        const err = await res.json();
+        setError(err.error || 'Save failed');
+        setSaving(false);
+        return;
+      }
+      const data = await res.json();
+      onSaved(isEdit ? data.reminder : data, isEdit);
+    } catch (e) {
+      setError('Network error');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <span>{isEdit ? 'Edit' : (isTask ? 'New Task' : 'New Reminder')}</span>
+          <button className="modal-close" onClick={onClose}><X size={16} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="modal-field">
+            <label>Type</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                className={`topup-btn${!isTask ? ' topup-btn--active' : ''}`}
+                onClick={() => setIsTask(false)}
+              >Reminder</button>
+              <button
+                className={`topup-btn${isTask ? ' topup-btn--active' : ''}`}
+                onClick={() => setIsTask(true)}
+              >Task</button>
+            </div>
+          </div>
+          <div className="modal-field">
+            <label>Note *</label>
+            <textarea
+              className="modal-input"
+              rows={2}
+              value={note}
+              onChange={e => setNote(e.target.value)}
+              placeholder="What needs to happen..."
+            />
+          </div>
+          <div className="modal-field">
+            <label>Contact Name</label>
+            <input
+              className="modal-input"
+              value={contactName}
+              onChange={e => setContactName(e.target.value)}
+              placeholder="Who is this for? (optional)"
+            />
+          </div>
+          <div className="modal-field">
+            <label>Mobile</label>
+            <input
+              className="modal-input"
+              value={contactMobile}
+              onChange={e => setContactMobile(e.target.value)}
+              placeholder="0400 000 000"
+            />
+          </div>
+          <div className="modal-field">
+            <label>{isTask ? 'Due Date (optional)' : 'Date & Time *'}</label>
+            <input
+              className="modal-input"
+              type="datetime-local"
+              value={fireAt}
+              onChange={e => setFireAt(e.target.value)}
+            />
+          </div>
+          {error && <div className="modal-error">{error}</div>}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn modal-btn--cancel" onClick={onClose}>Cancel</button>
+          <button className="modal-btn modal-btn--save" onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving...' : (isEdit ? 'Save Changes' : 'Add')}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2963,7 +3205,7 @@ function App() {
       case 'calls':     return <CallsPage token={token} onReminderCountChange={setReminderCount} />;
       case 'market':    return <MarketPage token={token} />;
       case 'buyers':    return <BuyersPage token={token} />;
-      case 'reminders': return <RemindersPage token={token} />;
+      case 'reminders': return <RemindersPage token={token} onReminderCountChange={setReminderCount} />;
       case 'search':    return <SearchPage token={token} />;
       case 'history':   return <HistoryPage token={token} />;
       default:          return <CallsPage token={token} onReminderCountChange={setReminderCount} />;
