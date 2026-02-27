@@ -1129,33 +1129,35 @@ app.patch('/api/contacts/:id', requireAuth, (req, res) => {
   }
 });
 
-// POST /api/contacts/:id/notes
-app.post('/api/contacts/:id/notes', requireAuth, async (req, res) => {
+// GET /api/contacts/:id/notes — fetch standalone notes for a contact
+app.get('/api/contacts/:id/notes', requireAuth, (req, res) => {
   try {
-    const { id }        = req.params;
-    const { notes_raw } = req.body;
-    db.prepare(`UPDATE contacts SET notes_raw = ? WHERE id = ?`).run(notes_raw, id);
-    const aiRes = await axios.post(
-      'https://api.anthropic.com/v1/messages',
-      {
-        model:      'claude-3-haiku-20240307',
-        max_tokens: 200,
-        messages: [{
-          role:    'user',
-          content: `Summarise these real estate CRM notes into 2-3 clean sentences suitable for pasting into an agent's CRM. Be factual and concise. Notes: ${notes_raw}`,
-        }],
-      },
-      {
-        headers: {
-          'x-api-key':         process.env.ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'content-type':      'application/json',
-        },
-      }
-    );
-    const notes_summary = aiRes.data.content[0].text;
-    db.prepare(`UPDATE contacts SET notes_summary = ? WHERE id = ?`).run(notes_summary, id);
-    res.json({ ok: true, notes_summary });
+    const rows = db.prepare(`
+      SELECT id, note, created_at FROM contact_notes
+      WHERE contact_id = ?
+      ORDER BY created_at DESC
+      LIMIT 50
+    `).all(req.params.id);
+    res.json(rows);
+  } catch (e) {
+    console.error('[GET /api/contacts/:id/notes]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/contacts/:id/notes — add a timestamped note
+app.post('/api/contacts/:id/notes', requireAuth, (req, res) => {
+  try {
+    const { id } = req.params;
+    const { note } = req.body;
+    if (!note || !note.trim()) return res.status(400).json({ error: 'note is required' });
+    const result = db.prepare(
+      `INSERT INTO contact_notes (contact_id, note) VALUES (?, ?)`
+    ).run(id, note.trim());
+    const row = db.prepare(
+      'SELECT id, note, created_at FROM contact_notes WHERE id = ?'
+    ).get(result.lastInsertRowid);
+    res.json({ ok: true, note: row });
   } catch (e) {
     console.error('[POST /api/contacts/:id/notes]', e.message);
     res.status(500).json({ error: e.message });
