@@ -1317,6 +1317,11 @@ function CallsPage({ token, onReminderCountChange }) {
           onClick={() => setShowNewContact(true)}
           title="Add new contact"
         ><Plus size={11} /> New</button>
+        <button
+          onClick={loadData}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '4px', borderRadius: '4px', display: 'flex', alignItems: 'center' }}
+          title="Refresh"
+        ><RefreshCw size={14} /></button>
       </div>
       <div className="call-col-body">
         {dueToday.length > 0 && (
@@ -1610,14 +1615,24 @@ function MarketPage({ token }) {
   const [refreshingId, setRefreshingId] = useState(null);
   const [statusFilter, setStatusFilter] = useState('all');
   const [daysFilter, setDaysFilter] = useState(30);
+  const [propertyTypeFilter, setPropertyTypeFilter] = useState('all');
+  const [sortOrder, setSortOrder] = useState('newest');
 
   const loadEvents = useCallback(() => {
     setLoading(true);
-    apiFetch(`/api/market?days=${daysFilter}&status=${statusFilter}`, token)
+    const params = new URLSearchParams({
+      days: daysFilter,
+      status: statusFilter,
+      sort: sortOrder,
+    });
+    if (propertyTypeFilter && propertyTypeFilter !== 'all') {
+      params.set('property_type', propertyTypeFilter);
+    }
+    apiFetch(`/api/market?${params.toString()}`, token)
       .then(r => r.ok ? r.json() : [])
       .then(data => { setEvents(Array.isArray(data) ? data : []); setLoading(false); })
       .catch(() => setLoading(false));
-  }, [token, daysFilter, statusFilter]);
+  }, [token, daysFilter, statusFilter, propertyTypeFilter, sortOrder]);
 
   useEffect(() => { loadEvents(); }, [loadEvents]);
 
@@ -1690,7 +1705,7 @@ function MarketPage({ token }) {
       </div>
 
       {/* Status + time filter bar */}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         {['all', 'active', 'sold', 'withdrawn'].map(s => (
           <button key={s}
             onClick={() => setStatusFilter(s)}
@@ -1718,6 +1733,42 @@ function MarketPage({ token }) {
               }}
             >{d}d</button>
           ))}
+        </div>
+      </div>
+
+      {/* Property type filter + sort bar */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        {[['all','All'],['house','House'],['unit','Unit'],['townhouse','Townhouse']].map(([val, label]) => (
+          <button key={val}
+            onClick={() => setPropertyTypeFilter(val)}
+            style={{
+              padding: '4px 10px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
+              fontFamily: 'var(--font-mono)', letterSpacing: 0.5,
+              background: propertyTypeFilter === val ? 'var(--bg-raised)' : 'var(--bg-card)',
+              color:      propertyTypeFilter === val ? 'var(--gold, var(--accent))' : 'var(--text-muted)',
+              border:     `1px solid ${propertyTypeFilter === val ? 'var(--gold, var(--accent))' : 'var(--border)'}`,
+              transition: 'all 0.15s',
+            }}
+          >{label}</button>
+        ))}
+        <div style={{ marginLeft: 'auto' }}>
+          <select
+            value={sortOrder}
+            onChange={e => setSortOrder(e.target.value)}
+            style={{
+              padding: '4px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
+              fontFamily: 'var(--font-mono)',
+              background: 'var(--bg-card)',
+              color: 'var(--text-muted)',
+              border: '1px solid var(--border)',
+              outline: 'none',
+            }}
+          >
+            <option value="newest">Newest First</option>
+            <option value="oldest">Oldest First</option>
+            <option value="price_high">Price High→Low</option>
+            <option value="price_low">Price Low→High</option>
+          </select>
         </div>
       </div>
 
@@ -1760,7 +1811,9 @@ function MarketPage({ token }) {
                 <div className="event-body">
                   <div className="event-addr">{ev.address || '—'}</div>
                   <div className="event-detail">
-                    {[ev.beds && `${ev.beds}bd`, ev.baths && `${ev.baths}ba`, ev.cars && `${ev.cars}car`,
+                    {[(ev.beds && ev.beds !== '0' && ev.beds !== 0) && `${ev.beds}bd`,
+                      (ev.baths && ev.baths !== '0' && ev.baths !== 0) && `${ev.baths}ba`,
+                      (ev.cars && ev.cars !== '0' && ev.cars !== 0) && `${ev.cars}car`,
                       ev.property_type, displayPrice,
                       ev.days_on_market && `${ev.days_on_market}d on mkt`]
                       .filter(Boolean).join(' · ')}
@@ -2005,14 +2058,19 @@ function BuyerCard({ buyer, token, onEdited, onDelete }) {
 
   const logOutcome = async (outcome) => {
     setLogging(true);
-    const res = await apiFetch(`/api/buyer-profiles/${buyer.id}/log-call`, token, {
-      method: 'POST', body: JSON.stringify({ outcome })
-    });
-    if (res.ok) {
-      setLastOutcome(outcome);
-      setShowOutcome(false);
+    try {
+      const res = await apiFetch(`/api/buyer-profiles/${buyer.id}/log-call`, token, {
+        method: 'POST', body: JSON.stringify({ outcome })
+      });
+      if (res.ok) {
+        setLastOutcome(outcome);
+        setShowOutcome(false);
+      }
+    } catch (err) {
+      console.error('log outcome failed', err);
+    } finally {
+      setLogging(false);
     }
-    setLogging(false);
   };
 
   return (
@@ -2361,7 +2419,7 @@ function RemindersPage({ token, onReminderCountChange }) {
                   <div className="rem-check-circle" />
                 </button>
                 <div className="rem-item-body">
-                  {r.contact_name && r.contact_name !== 'Manual Task' && (
+                  {r.contact_name && r.contact_name !== 'Manual Task' && r.contact_name !== 'Task' && (
                     <div className="rem-item-contact">{r.contact_name}</div>
                   )}
                   <div className="rem-item-note">{r.note}</div>
@@ -2433,7 +2491,7 @@ function AddEditReminderModal({ token, reminder, defaultIsTask, onSaved, onClose
     setError('');
     const body = {
       note: note.trim(),
-      contact_name: contactName.trim() || 'Task',
+      contact_name: contactName.trim() || 'Manual Task',
       contact_mobile: contactMobile.trim() || null,
       fire_at: isTask ? (fireAt || undefined) : fireAt,
       is_task: isTask ? 1 : 0,
@@ -2971,9 +3029,15 @@ function SearchPage({ token }) {
             <label className="search-field-label">Suburb</label>
             <select className="search-input" value={form.suburb} onChange={e => set('suburb', e.target.value)}>
               <option value="all">All Suburbs</option>
-              <option value="willoughby east">Willoughby East</option>
+              <option value="artarmon">Artarmon</option>
+              <option value="castle cove">Castle Cove</option>
+              <option value="castlecrag">Castlecrag</option>
+              <option value="chatswood">Chatswood</option>
+              <option value="middle cove">Middle Cove</option>
+              <option value="naremburn">Naremburn</option>
               <option value="north willoughby">North Willoughby</option>
               <option value="willoughby">Willoughby</option>
+              <option value="willoughby east">Willoughby East</option>
             </select>
           </div>
           <div className="search-field">

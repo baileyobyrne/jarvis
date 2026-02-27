@@ -470,7 +470,7 @@ async function notifyBuyerMatches(matches, eventAddress, marketEventId) {
     'INSERT OR IGNORE INTO buyer_matches (buyer_id, market_event_id, event_address, notified_telegram) VALUES (?, ?, ?, 1)'
   );
   const insertReminder = db.prepare(
-    "INSERT INTO reminders (contact_name, contact_mobile, note, fire_at, is_task) VALUES (?, ?, ?, datetime('now', '+1 day', 'start of day', '+9 hours'), 0)"
+    "INSERT INTO reminders (contact_name, contact_mobile, note, fire_at, is_task, contact_id) VALUES (?, ?, ?, datetime('now', '+1 day', 'start of day', '+9 hours'), 0, ?)"
   );
   const updateMatch = db.prepare('UPDATE buyer_matches SET reminder_created=1, reminder_id=? WHERE buyer_id=? AND market_event_id=? AND event_address=?');
 
@@ -482,7 +482,8 @@ async function notifyBuyerMatches(matches, eventAddress, marketEventId) {
         const remId = insertReminder.run(
           m.buyer.name,
           m.buyer.mobile || null,
-          `Buyer match — call ${m.buyer.name} re: ${eventAddress}`
+          `Buyer match — call ${m.buyer.name} re: ${eventAddress}`,
+          m.buyer.contact_id || null
         ).lastInsertRowid;
         if (marketEventId) {
           updateMatch.run(remId, m.buyer.id, marketEventId, (eventAddress || '').toUpperCase());
@@ -748,12 +749,13 @@ app.get('/api/alerts', (req, res) => {
     // Build outcome map: most recent call_log entry per contact
     const outcomeMap = {};
     if (contactIds.length > 0) {
-      const placeholders = contactIds.map(() => '?').join(',');
+      const safeIds = contactIds.slice(0, 500);
+      const placeholders = safeIds.map(() => '?').join(',');
       const rows = db.prepare(
         `SELECT contact_id, outcome, called_at FROM call_log
          WHERE contact_id IN (${placeholders})
          ORDER BY called_at DESC`
-      ).all(...contactIds);
+      ).all(...safeIds);
       for (const row of rows) {
         if (!outcomeMap[row.contact_id]) outcomeMap[row.contact_id] = row.outcome;
       }
@@ -1200,6 +1202,12 @@ app.patch('/api/reminders/:id', requireAuth, (req, res) => {
     const existing = db.prepare('SELECT id, sent, completed_at FROM reminders WHERE id = ?').get(id);
     if (!existing) return res.status(404).json({ error: 'not found' });
     if (existing.completed_at) return res.status(409).json({ error: 'cannot edit a completed reminder' });
+    // Validate: a non-task reminder must have a fire_at date
+    const finalIsTask = req.body.is_task !== undefined ? Number(req.body.is_task) : existing.is_task;
+    const finalFireAt = 'fire_at' in req.body ? req.body.fire_at : existing.fire_at;
+    if (finalIsTask === 0 && !finalFireAt) {
+      return res.status(400).json({ error: 'A reminder (non-task) must have a fire_at date.' });
+    }
     const ALLOWED = ['note', 'fire_at', 'contact_name', 'contact_mobile', 'is_task'];
     const sets = [], vals = [];
     for (const key of ALLOWED) {
@@ -1245,9 +1253,12 @@ app.get('/api/market', requireAuth, (req, res) => {
     const VALID_STATUSES    = ['all', 'active', 'sold', 'withdrawn'];
     const statusFilter      = VALID_STATUSES.includes(req.query.status) ? req.query.status : 'all';
 
-    const statusWhere = statusFilter !== 'all'
-      ? `AND COALESCE(status, CASE WHEN type='sold' THEN 'sold' WHEN type='unlisted' THEN 'withdrawn' ELSE 'active' END) = '${statusFilter}'`
-      : '';
+    let statusWhere = '';
+    const statusParams = [];
+    if (statusFilter !== 'all') {
+      statusWhere = `AND COALESCE(status, CASE WHEN type='sold' THEN 'sold' WHEN type='unlisted' THEN 'withdrawn' ELSE 'active' END) = ?`;
+      statusParams.push(statusFilter);
+    }
 
     const VALID_PROPERTY_TYPES = ['house', 'unit', 'townhouse', 'all'];
     const propertyTypeParam   = (req.query.property_type || '').toLowerCase();
@@ -1265,7 +1276,7 @@ app.get('/api/market', requireAuth, (req, res) => {
       price_low:  "ORDER BY CAST(REPLACE(REPLACE(COALESCE(confirmed_price, price, ''), '$', ''), ',', '') AS INTEGER) ASC",
     }[sortParam];
 
-    const liveParams = [String(days)];
+    const liveParams = [String(days), ...statusParams];
     if (propertyTypeFilter !== 'all') liveParams.push(`%${propertyTypeFilter}%`);
 
     const liveRows = db.prepare(`
@@ -1470,6 +1481,7 @@ app.delete('/api/contacts/:id', requireAuth, (req, res) => {
       db.prepare('DELETE FROM listing_watchers WHERE contact_id = ?').run(id);
       db.prepare('DELETE FROM call_log WHERE contact_id = ?').run(id);
       db.prepare('UPDATE buyer_profiles SET contact_id = NULL WHERE contact_id = ?').run(id);
+      db.prepare('UPDATE properties SET contact_id = NULL WHERE contact_id = ?').run(id);
       db.prepare('DELETE FROM contacts WHERE id = ?').run(id);
     })();
     res.json({ ok: true });

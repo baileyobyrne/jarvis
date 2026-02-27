@@ -32,6 +32,7 @@ async function main() {
     WHERE fire_at <= datetime('now', 'localtime')
       AND sent = 0
       AND completed_at IS NULL
+      AND is_task = 0
   `).all();
 
   if (due.length === 0) {
