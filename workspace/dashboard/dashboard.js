@@ -1175,25 +1175,51 @@ function MarketPage({ token }) {
       ) : (
         <div className="event-list">
           {events.map((ev, i) => {
-            const displayPrice = ev.price || ev.pf_estimate;
-            const priceLabel   = ev.price ? ev.price : (ev.pf_estimate ? `Est. ${ev.pf_estimate}` : null);
-            const isManual     = ev.source === 'Manual';
+            const isManual     = true; // all events are editable
             const isDeleting   = confirmDeleteId === ev.id;
+            const evDate       = ev.event_date || ev.detected_at;
+            const fmtEvDate    = evDate ? new Date(evDate).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }) : '';
+            const statusBadge  = ev.status && ev.status !== 'active' ? ev.status.toUpperCase() : null;
+            const displayPrice = ev.confirmed_price
+              ? `${ev.confirmed_price} ✓`
+              : (ev.price && ev.price !== 'Price Withheld' ? ev.price : ev.pf_estimate ? `Est. ${ev.pf_estimate}` : null);
+            const isPriceWithheld = !ev.confirmed_price && (ev.price === 'Price Withheld' || ev.price_withheld);
             return (
               <div className="event-card" key={ev.id || i} style={{ animationDelay: `${i * 0.03}s` }}>
-                <span className={`event-type-badge ${typeClass[ev.event_type] || typeClass[ev.type] || 'type-listing'}`}>
-                  {ev.event_type || ev.type || 'event'}
-                </span>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
+                  <span className={`event-type-badge ${typeClass[ev.event_type] || typeClass[ev.type] || 'type-listing'}`}>
+                    {ev.event_type || ev.type || 'event'}
+                  </span>
+                  {statusBadge && (
+                    <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 3, background: statusBadge === 'WITHDRAWN' ? '#6b728022' : '#22c55e22', color: statusBadge === 'WITHDRAWN' ? '#9ca3af' : '#22c55e', border: `1px solid ${statusBadge === 'WITHDRAWN' ? '#6b7280' : '#22c55e'}`, fontFamily: 'var(--font-mono)', fontWeight: 700, letterSpacing: 1 }}>
+                      {statusBadge}
+                    </span>
+                  )}
+                  {isPriceWithheld && (
+                    <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 3, background: '#f59e0b22', color: '#f59e0b', border: '1px solid #f59e0b', fontFamily: 'var(--font-mono)' }}>
+                      PRICE WITHHELD
+                    </span>
+                  )}
+                </div>
                 <div className="event-body">
                   <div className="event-addr">{ev.address || '—'}</div>
                   <div className="event-detail">
-                    {[ev.suburb, ev.beds && `${ev.beds}bd`, ev.baths && `${ev.baths}ba`,
-                      ev.property_type, priceLabel]
+                    {[ev.beds && `${ev.beds}bd`, ev.baths && `${ev.baths}ba`, ev.cars && `${ev.cars}car`,
+                      ev.property_type, displayPrice,
+                      ev.days_on_market && `${ev.days_on_market}d on mkt`]
                       .filter(Boolean).join(' · ')}
                   </div>
+                  {(ev.agent_name || ev.agency) && (
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3 }}>
+                      {[ev.agent_name, ev.agency].filter(Boolean).join(' — ')}
+                    </div>
+                  )}
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, flexShrink: 0 }}>
-                  <div className="event-meta">{timeAgo(ev.detected_at || ev.event_date)}</div>
+                  <div className="event-meta" style={{ textAlign: 'right' }}>
+                    <div>{timeAgo(ev.detected_at || ev.event_date)}</div>
+                    {fmtEvDate && <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>{fmtEvDate}</div>}
+                  </div>
                   {isManual && (
                     <div style={{ display: 'flex', gap: 6 }}>
                       {isDeleting ? (
