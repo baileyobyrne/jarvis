@@ -966,24 +966,35 @@ app.patch('/api/plan/:contactId/outcome', requireAuth, (req, res) => {
 // POST /api/reminders
 app.post('/api/reminders', requireAuth, async (req, res) => {
   try {
-    const { contact_id, contact_name, contact_mobile, note, fire_at, duration_minutes } = req.body;
+    const { contact_id, contact_name, contact_mobile, note, fire_at, duration_minutes, is_task } = req.body;
+    const isTask = is_task ? 1 : 0;
+    if (!contact_name || !note) return res.status(400).json({ error: 'contact_name and note are required' });
+    if (!isTask && !fire_at) return res.status(400).json({ error: 'fire_at required for reminders (use is_task=true for tasks)' });
     const dur = duration_minutes ? parseInt(duration_minutes, 10) : 30;
-    db.prepare(`
-      INSERT INTO reminders (contact_id, contact_name, contact_mobile, note, fire_at, duration_minutes)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(contact_id, contact_name, contact_mobile, note, fire_at, dur);
+    const r = db.prepare(`
+      INSERT INTO reminders (contact_id, contact_name, contact_mobile, note, fire_at, duration_minutes, is_task)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(contact_id || null, contact_name, contact_mobile || null, note, fire_at || null, dur, isTask);
 
-    // iCloud CalDAV sync — fire-and-forget, never blocks the response
-    createCalendarEvent({
-      contact_name:     contact_name || 'Unknown',
-      contact_mobile:   contact_mobile || null,
-      contact_address:  null,
-      note:             note || '',
-      fire_at,
-      duration_minutes: dur,
-    }).catch(() => {});
+    // iCloud CalDAV sync — skip for tasks or when no fire_at
+    if (!isTask && fire_at) {
+      createCalendarEvent({
+        contact_name:     contact_name || 'Unknown',
+        contact_mobile:   contact_mobile || null,
+        contact_address:  null,
+        note:             note || '',
+        fire_at,
+        duration_minutes: dur,
+      }).then(uid => {
+        if (uid) {
+          db.prepare('UPDATE reminders SET calendar_event_uid = ? WHERE id = ?').run(uid, r.lastInsertRowid);
+        }
+      }).catch(calErr => {
+        console.warn('[reminders] iCal sync failed:', calErr.message);
+      });
+    }
 
-    res.json({ ok: true });
+    res.json({ ok: true, id: r.lastInsertRowid });
   } catch (e) {
     console.error('[POST /api/reminders]', e.message);
     res.status(500).json({ error: e.message });
@@ -1004,6 +1015,61 @@ app.get('/api/reminders/upcoming', requireAuth, (req, res) => {
     res.json(rows);
   } catch (e) {
     console.error('[GET /api/reminders/upcoming]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/reminders/:id/complete
+app.post('/api/reminders/:id/complete', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const result = db.prepare(
+      "UPDATE reminders SET completed_at = datetime('now','localtime') WHERE id = ? AND completed_at IS NULL"
+    ).run(id);
+    if (result.changes === 0) return res.status(404).json({ error: 'not found or already completed' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[POST /api/reminders/:id/complete]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PATCH /api/reminders/:id
+app.patch('/api/reminders/:id', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const ALLOWED = ['note', 'fire_at', 'contact_name', 'contact_mobile'];
+    const sets = [], vals = [];
+    for (const key of ALLOWED) {
+      if (req.body[key] !== undefined) {
+        sets.push(`${key} = ?`);
+        vals.push(req.body[key] === '' ? null : req.body[key]);
+      }
+    }
+    if (sets.length === 0) return res.status(400).json({ error: 'no valid fields to update' });
+    vals.push(id);
+    db.prepare(`UPDATE reminders SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    const reminder = db.prepare('SELECT * FROM reminders WHERE id = ?').get(id);
+    if (!reminder) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true, reminder });
+  } catch (e) {
+    console.error('[PATCH /api/reminders/:id]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/reminders/:id
+app.delete('/api/reminders/:id', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const result = db.prepare('DELETE FROM reminders WHERE id = ?').run(id);
+    if (result.changes === 0) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[DELETE /api/reminders/:id]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
