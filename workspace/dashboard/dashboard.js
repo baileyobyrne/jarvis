@@ -10,7 +10,7 @@ const {
   MapPin, Calendar, Check, X, AlertCircle, Home, Activity,
   MessageSquare, PhoneCall, PhoneOff, PhoneMissed, Star, RefreshCw,
   History, Menu, Building2, CheckCircle, Bed, Bath, Car, Plus, Mail,
-  Search, Pencil, Trash2, Copy, SortAsc, Send
+  Search, Pencil, Trash2, Copy, SortAsc, Send, ClipboardList, FileEdit
 } = LucideReact;
 
 // SMS link helper — opens iMessages on macOS
@@ -515,6 +515,73 @@ function TierSection({ tier, contacts, token, onLogged, activeContactId, default
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Edit Contact Modal ──────────────────────────────────────────────────────
+function EditContactModal({ contact, token, onSaved, onClose }) {
+  const [name,    setName]    = useState(contact.name || '');
+  const [mobile,  setMobile]  = useState(contact.mobile || '');
+  const [address, setAddress] = useState(contact.address || '');
+  const [suburb,  setSuburb]  = useState(contact.suburb || '');
+  const [dnc,     setDnc]     = useState(!!contact.do_not_call);
+  const [saving,  setSaving]  = useState(false);
+  const [error,   setError]   = useState(null);
+
+  const handleSave = useCallback(async () => {
+    if (!name.trim()) { setError('Name is required'); return; }
+    setSaving(true); setError(null);
+    try {
+      const res = await apiFetch(`/api/contacts/${contact.id}`, token, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: name.trim(), mobile: mobile.trim(),
+          address: address.trim(), suburb: suburb.trim(),
+          do_not_call: dnc ? 1 : 0
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Save failed');
+      onSaved(data.contact);
+      onClose();
+    } catch (e) { setError(e.message); }
+    finally { setSaving(false); }
+  }, [contact.id, name, mobile, address, suburb, dnc, token, onSaved, onClose]);
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">Edit Contact</span>
+          <button className="modal-close" onClick={onClose}><X size={14} /></button>
+        </div>
+        <div className="modal-body">
+          {[['Name', name, setName, 'text', ''],
+            ['Mobile', mobile, setMobile, 'text', '04xx xxx xxx'],
+            ['Address', address, setAddress, 'text', ''],
+            ['Suburb', suburb, setSuburb, 'text', '']
+          ].map(([label, val, setter, type, ph]) => (
+            <div className="edit-field" key={label}>
+              <label className="edit-label">{label}</label>
+              <input className="edit-input" type={type} value={val}
+                placeholder={ph} onChange={e => setter(e.target.value)} />
+            </div>
+          ))}
+          <div className="edit-field edit-field--inline">
+            <label className="edit-label">Do Not Call</label>
+            <input type="checkbox" className="edit-checkbox" checked={dnc}
+              onChange={e => setDnc(e.target.checked)} />
+          </div>
+          {error && <div className="edit-error">{error}</div>}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn modal-btn--cancel" onClick={onClose}>Cancel</button>
+          <button className="modal-btn modal-btn--save" onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving\u2026' : 'Save'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1111,11 +1178,11 @@ function AddEventModal({ token, onClose, onAdded, editEvent }) {
           </>
         )}
 
-        {isEdit && (
+        {isEdit && form.type !== 'sold' && (
           <>
             <label className="form-label">Status</label>
             <select className="form-input" value={form.status} onChange={e => set('status', e.target.value)}>
-              <option value="active">Active Listing</option>
+              <option value="active">Active</option>
               <option value="sold">Sold</option>
               <option value="withdrawn">Withdrawn</option>
             </select>
@@ -1125,8 +1192,8 @@ function AddEventModal({ token, onClose, onAdded, editEvent }) {
         {error && <div style={{ color: '#f87171', fontSize: 12, marginTop: 8 }}>{error}</div>}
 
         <div className="modal-actions">
-          <button className="modal-btn-cancel" onClick={onClose}>Cancel</button>
-          <button className="modal-btn-save" onClick={handleSubmit} disabled={saving}>
+          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" onClick={handleSubmit} disabled={saving}>
             {saving ? (isEdit ? 'Saving…' : 'Adding…') : (isEdit ? 'Save Changes' : 'Add Event')}
           </button>
         </div>
@@ -1270,7 +1337,8 @@ function MarketPage({ token }) {
             const isDeleting   = confirmDeleteId === ev.id;
             const evDate       = ev.event_date || ev.detected_at;
             const fmtEvDate    = evDate ? new Date(evDate).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }) : '';
-            const statusBadge  = ev.status && ev.status !== 'active' ? ev.status.toUpperCase() : null;
+            const evType       = ev.event_type || ev.type;
+            const statusBadge  = ev.status && ev.status !== 'active' && ev.status !== evType ? ev.status.toUpperCase() : null;
             const displayPrice = ev.confirmed_price
               ? `${ev.confirmed_price} ✓`
               : (ev.price && ev.price !== 'Price Withheld' ? ev.price : ev.pf_estimate ? `Est. ${ev.pf_estimate}` : null);
