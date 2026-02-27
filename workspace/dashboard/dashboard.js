@@ -312,6 +312,7 @@ function ContactCard({ contact: dp, token, onLogged, autoExpand, index }) {
   const [localOutcome, setLocalOutcome] = useState(dp.outcome || null);
   const [localCalledAt, setLocalCalledAt] = useState(dp.called_at || null);
   const [showReminder, setShowReminder] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   // Auto-expand when autoExpand prop changes
   useEffect(() => {
@@ -360,10 +361,23 @@ function ContactCard({ contact: dp, token, onLogged, autoExpand, index }) {
           </div>
           <div className="card-actions-header">
             {dp.mobile && (
-              <a className="call-btn" href={`tel:${dp.mobile}`}>
-                <Phone size={12} />
-                {dp.mobile}
-              </a>
+              <>
+                <a className="call-btn" href={`tel:${dp.mobile}`}>
+                  <Phone size={12} />
+                  {dp.mobile}
+                </a>
+                <a className="expand-btn" href={smsHref(dp.mobile)} title="Send iMessage/SMS" style={{ color: '#3b82f6' }}>
+                  <MessageSquare size={14} />
+                </a>
+                <button
+                  className="expand-btn"
+                  onClick={() => { navigator.clipboard.writeText(dp.mobile); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+                  title={copied ? 'Copied!' : 'Copy number'}
+                  style={{ color: copied ? '#22c55e' : 'var(--text-muted)' }}
+                >
+                  <Copy size={14} />
+                </button>
+              </>
             )}
             <button className="expand-btn" onClick={() => setShowReminder(true)} title="Set Reminder">
               <Bell size={14} />
@@ -515,6 +529,7 @@ function ProspectCard({ contact, onLogged, token, eventType, eventAddress }) {
   const [savingFollowUp, setSavingFollowUp] = useState(false);
   const [watching, setWatching]     = useState(!!contact.watching);
   const [watchPending, setWatchPending] = useState(false);
+  const [copied, setCopied]         = useState(false);
 
   const logCall = useCallback(async (outcome) => {
     setLogging(true);
@@ -586,8 +601,15 @@ function ProspectCard({ contact, onLogged, token, eventType, eventAddress }) {
                 <Phone size={11} />{contact.mobile}
               </a>
               <a className="prospect-sms" href={smsHref(contact.mobile)} title="Send iMessage/SMS">
-                <MessageSquare size={11} />
+                <MessageSquare size={12} />
               </a>
+              <button
+                className="prospect-copy"
+                onClick={() => { navigator.clipboard.writeText(contact.mobile); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+                title={copied ? 'Copied!' : 'Copy number'}
+              >
+                {copied ? <Check size={12} /> : <Copy size={12} />}
+              </button>
             </>
           )}
           {eventType === 'listing' && contact.id && (
@@ -851,9 +873,21 @@ function CallsPage({ token, onReminderCountChange }) {
                 <div className="due-today-name">{r.contact_name}</div>
                 <div className="due-today-note">{r.note}</div>
                 {r.contact_mobile && (
-                  <a className="prospect-tel" href={`tel:${r.contact_mobile}`} style={{ marginTop: 4, display: 'inline-flex' }}>
-                    <Phone size={10} />{r.contact_mobile}
-                  </a>
+                  <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <a className="prospect-tel" href={`tel:${r.contact_mobile}`} style={{ display: 'inline-flex' }}>
+                      <Phone size={10} />{r.contact_mobile}
+                    </a>
+                    <a className="prospect-sms" href={smsHref(r.contact_mobile)} title="Send iMessage/SMS">
+                      <MessageSquare size={12} />
+                    </a>
+                    <button
+                      className="prospect-copy"
+                      onClick={() => navigator.clipboard.writeText(r.contact_mobile)}
+                      title="Copy number"
+                    >
+                      <Copy size={12} />
+                    </button>
+                  </div>
                 )}
               </div>
             ))}

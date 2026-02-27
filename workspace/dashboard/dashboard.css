@@ -2374,11 +2374,24 @@ body::before {
   align-items: center;
   color: var(--text-muted);
   text-decoration: none;
-  padding: 2px 4px;
+  padding: 3px 5px;
   border-radius: 3px;
   transition: color 0.15s;
 }
 .prospect-sms:hover { color: #3b82f6; }
+
+.prospect-copy {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 3px 5px;
+  border-radius: 3px;
+  transition: color 0.15s;
+}
+.prospect-copy:hover { color: var(--gold); }
 
 /* ── SearchCard — SMS / Copy / Reminder buttons ────────────────────────────── */
 .search-action--sms {
