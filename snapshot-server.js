@@ -363,7 +363,9 @@ function parsePriceToInt(priceStr) {
   if (mMatch) return Math.round(parseFloat(mMatch[1]) * 1e6);
   const kMatch = s.match(/^([\d.]+)\s*k/);
   if (kMatch) return Math.round(parseFloat(kMatch[1]) * 1e3);
-  const num = parseFloat(s.replace(/[^0-9.]/g, ''));
+  const stripped = s.replace(/[^0-9.]/g, '');
+  if ((stripped.match(/\./g) || []).length > 1) return null; // reject malformed like "1.8.5"
+  const num = parseFloat(stripped);
   return isNaN(num) ? null : Math.round(num);
 }
 
@@ -389,11 +391,17 @@ function findMatchingBuyers(event) {
     const suburbMatch = suburbsNorm.length === 0 || suburbsNorm.includes(eventSuburb);
     if (!suburbMatch) continue;
 
-    // Check for recent duplicate match (last 14 days) for known event IDs
+    // Dedup check — prevent re-notifying same buyer for same address within 14 days
     if (event.id) {
       const recent = db.prepare(
         "SELECT id FROM buyer_matches WHERE buyer_id = ? AND market_event_id = ? AND matched_at >= datetime('now', '-14 days')"
       ).get(buyer.id, event.id);
+      if (recent) continue;
+    } else {
+      // No event ID — deduplicate by address
+      const recent = db.prepare(
+        "SELECT id FROM buyer_matches WHERE buyer_id = ? AND event_address = ? AND matched_at >= datetime('now', '-14 days')"
+      ).get(buyer.id, (event.address || '').toUpperCase());
       if (recent) continue;
     }
 
@@ -458,19 +466,6 @@ function findMatchingBuyers(event) {
 async function notifyBuyerMatches(matches, eventAddress, marketEventId) {
   if (matches.length === 0) return;
 
-  const msgLines = matches.slice(0, 5).map(m => {
-    const parts = [m.buyer.name];
-    if (m.buyer.mobile) parts.push(m.buyer.mobile);
-    if (m.reasons.length) parts.push(`(${m.reasons.join(', ')})`);
-    return `• ${parts.join(' — ')}`;
-  });
-
-  const msg = `🏠 <b>BUYER MATCH — ${eventAddress}</b>\n\n${matches.length} active buyer profile${matches.length > 1 ? 's' : ''} match:\n${msgLines.join('\n')}${matches.length > 5 ? `\n...and ${matches.length - 5} more` : ''}\n\nCheck Buyers page to follow up.`;
-
-  // Send Telegram (non-blocking)
-  sendTelegramMessage(msg).catch(e => console.warn('[buyer-match] Telegram failed:', e.message));
-
-  // Record matches and create reminders
   const insertMatch = db.prepare(
     'INSERT OR IGNORE INTO buyer_matches (buyer_id, market_event_id, event_address, notified_telegram) VALUES (?, ?, ?, 1)'
   );
@@ -479,9 +474,10 @@ async function notifyBuyerMatches(matches, eventAddress, marketEventId) {
   );
   const updateMatch = db.prepare('UPDATE buyer_matches SET reminder_created=1, reminder_id=? WHERE buyer_id=? AND market_event_id=? AND event_address=?');
 
+  const notified = [];
   for (const m of matches) {
     try {
-      const matchResult = insertMatch.run(m.buyer.id, marketEventId || null, eventAddress);
+      const matchResult = insertMatch.run(m.buyer.id, marketEventId || null, (eventAddress || '').toUpperCase());
       if (matchResult.changes > 0) {
         const remId = insertReminder.run(
           m.buyer.name,
@@ -489,13 +485,28 @@ async function notifyBuyerMatches(matches, eventAddress, marketEventId) {
           `Buyer match — call ${m.buyer.name} re: ${eventAddress}`
         ).lastInsertRowid;
         if (marketEventId) {
-          updateMatch.run(remId, m.buyer.id, marketEventId, eventAddress);
+          updateMatch.run(remId, m.buyer.id, marketEventId, (eventAddress || '').toUpperCase());
         }
+        notified.push(m);
       }
     } catch (e) {
       console.warn('[buyer-match] Failed to record match:', e.message);
     }
   }
+
+  // Only send Telegram if at least one new notification was created
+  if (notified.length === 0) return;
+
+  const msgLines = notified.slice(0, 5).map(m => {
+    const parts = [m.buyer.name];
+    if (m.buyer.mobile) parts.push(m.buyer.mobile);
+    if (m.reasons.length) parts.push(`(${m.reasons.join(', ')})`);
+    return `• ${parts.join(' — ')}`;
+  });
+
+  const msg = `🏠 <b>BUYER MATCH — ${eventAddress}</b>\n\n${notified.length} active buyer profile${notified.length > 1 ? 's' : ''} match:\n${msgLines.join('\n')}${notified.length > 5 ? `\n...and ${notified.length - 5} more` : ''}\n\nCheck Buyers page to follow up.`;
+
+  sendTelegramMessage(msg).catch(e => console.warn('[buyer-match] Telegram failed:', e.message));
 }
 
 // ─── Auth middleware ───────────────────────────────────────────────────────────
@@ -2743,6 +2754,8 @@ app.post('/api/buyer-profiles', requireAuth, (req, res) => {
             price_min, price_max, beds_min, beds_max, property_type,
             suburbs_wanted, timeframe, features, status, source, notes } = req.body;
     if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
+    const VALID_BP_STATUSES = ['active', 'paused', 'purchased', 'archived'];
+    const safeStatus = VALID_BP_STATUSES.includes(status) ? status : 'active';
     const r = db.prepare(`
       INSERT INTO buyer_profiles
         (name, mobile, email, address, suburb, contact_id,
@@ -2753,7 +2766,7 @@ app.post('/api/buyer-profiles', requireAuth, (req, res) => {
       name.trim(), mobile||null, email||null, address||null, suburb||null, contact_id||null,
       price_min||null, price_max||null, beds_min||null, beds_max||null, property_type||null,
       suburbs_wanted ? JSON.stringify(Array.isArray(suburbs_wanted) ? suburbs_wanted : [suburbs_wanted]) : null,
-      timeframe||null, features||null, status||'active', source||null, notes||null
+      timeframe||null, features||null, safeStatus, source||null, notes||null
     );
     const buyer = db.prepare('SELECT * FROM buyer_profiles WHERE id = ?').get(r.lastInsertRowid);
     try { buyer.suburbs_wanted = JSON.parse(buyer.suburbs_wanted || '[]'); } catch (_) { buyer.suburbs_wanted = []; }
@@ -2797,7 +2810,10 @@ app.patch('/api/buyer-profiles/:id', requireAuth, (req, res) => {
       if (req.body[key] !== undefined) {
         sets.push(`${key} = ?`);
         const v = req.body[key];
-        if (key === 'suburbs_wanted') {
+        if (key === 'status') {
+          const VALID_BP_STATUSES = ['active', 'paused', 'purchased', 'archived'];
+          vals.push(VALID_BP_STATUSES.includes(v) ? v : 'active');
+        } else if (key === 'suburbs_wanted') {
           vals.push(v ? JSON.stringify(Array.isArray(v) ? v : [v]) : null);
         } else {
           vals.push(v === '' ? null : v);
