@@ -955,7 +955,8 @@ app.get('/api/market', requireAuth, (req, res) => {
   try {
     const days              = Math.min(Math.max(parseInt(req.query.days) || 14, 1), 365);
     const includeHistorical = req.query.include_historical === '1' || req.query.include_historical === 'true';
-    const statusFilter      = req.query.status || 'all';
+    const VALID_STATUSES    = ['all', 'active', 'sold', 'withdrawn'];
+    const statusFilter      = VALID_STATUSES.includes(req.query.status) ? req.query.status : 'all';
 
     const statusWhere = statusFilter !== 'all'
       ? `AND COALESCE(status, CASE WHEN type='sold' THEN 'sold' WHEN type='unlisted' THEN 'withdrawn' ELSE 'active' END) = '${statusFilter}'`
@@ -1093,6 +1094,33 @@ app.get('/api/contacts/search', requireAuth, (req, res) => {
     res.json(rows);
   } catch (e) {
     console.error('[GET /api/contacts/search]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PATCH /api/contacts/:id — edit contact fields
+app.patch('/api/contacts/:id', requireAuth, (req, res) => {
+  try {
+    const { id } = req.params;
+    const ALLOWED = ['name', 'mobile', 'address', 'suburb', 'do_not_call'];
+    const sets = [];
+    const vals = [];
+    for (const key of ALLOWED) {
+      if (req.body[key] !== undefined) {
+        sets.push(`${key} = ?`);
+        vals.push(req.body[key]);
+      }
+    }
+    if (sets.length === 0) return res.status(400).json({ error: 'No valid fields provided' });
+    sets.push(`updated_at = datetime('now','localtime')`);
+    vals.push(id);
+    db.prepare(`UPDATE contacts SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    const updated = db.prepare(
+      'SELECT id, name, mobile, address, suburb, do_not_call FROM contacts WHERE id = ?'
+    ).get(id);
+    res.json({ ok: true, contact: updated });
+  } catch (e) {
+    console.error('[PATCH /api/contacts/:id]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
