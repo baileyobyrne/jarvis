@@ -2261,8 +2261,9 @@ function JarvisChat({ token }) {
   const [input, setInput]       = useState('');
   const [thinking, setThinking] = useState(false);
   const [actionMsg, setActionMsg] = useState('');
-  const bottomRef = useRef(null);
-  const inputRef  = useRef(null);
+  const bottomRef     = useRef(null);
+  const inputRef      = useRef(null);
+  const actionTimerRef = useRef(null);
 
   useEffect(() => {
     if (open && bottomRef.current) bottomRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -2271,6 +2272,8 @@ function JarvisChat({ token }) {
   useEffect(() => {
     if (open && inputRef.current) inputRef.current.focus();
   }, [open]);
+
+  useEffect(() => () => clearTimeout(actionTimerRef.current), []);
 
   const send = useCallback(async () => {
     const text = input.trim();
@@ -2289,7 +2292,8 @@ function JarvisChat({ token }) {
         setMessages(prev => [...prev, { role: 'assistant', content: data.reply }]);
         if (data.action?.type === 'price_updated') {
           setActionMsg(`✅ Price recorded for event #${data.action.event_id}: ${data.action.price}`);
-          setTimeout(() => setActionMsg(''), 6000);
+          clearTimeout(actionTimerRef.current);
+          actionTimerRef.current = setTimeout(() => setActionMsg(''), 6000);
         }
       } else {
         setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I hit an error. Please try again.' }]);
