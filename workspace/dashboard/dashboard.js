@@ -303,176 +303,322 @@ function ReminderModal({ contact, token, onClose }) {
   );
 }
 
-// ── Contact Card ───────────────────────────────────────────────────────────
-function ContactCard({ contact: dp, token, onLogged, autoExpand, index }) {
-  const [expanded, setExpanded] = useState(!!autoExpand);
-  const [note, setNote] = useState('');
-  const [showNote, setShowNote] = useState(false);
-  const [logging, setLogging] = useState(false);
-  const [localOutcome, setLocalOutcome] = useState(dp.outcome || null);
-  const [localCalledAt, setLocalCalledAt] = useState(dp.called_at || null);
-  const [showReminder, setShowReminder] = useState(false);
-  const [copied, setCopied] = useState(false);
+// ── Context → label map ────────────────────────────────────────────────────
+const CONTEXT_LABELS = {
+  circle:  'Prospecting',
+  sold:    'Just Sold',
+  listed:  'Just Listed',
+  search:  'Search',
+};
 
-  // Auto-expand when autoExpand prop changes
-  useEffect(() => {
-    if (autoExpand) setExpanded(true);
-  }, [autoExpand]);
+// ── Unified Contact Card ───────────────────────────────────────────────────
+function ContactCard({ contact, token, onLogged, context, eventAddress, autoExpand, index }) {
+  const [expanded,       setExpanded]       = useState(!!autoExpand);
+  const [userNote,       setUserNote]       = useState('');
+  const [showNote,       setShowNote]       = useState(false);
+  const [logging,        setLogging]        = useState(false);
+  const [localOutcome,   setLocalOutcome]   = useState(contact.outcome || null);
+  const [localCalledAt,  setLocalCalledAt]  = useState(contact.called_at || null);
+  const [showFollowUp,   setShowFollowUp]   = useState(false);
+  const [followUpDays,   setFollowUpDays]   = useState(1);
+  const [followUpNote,   setFollowUpNote]   = useState('');
+  const [savingFollowUp, setSavingFollowUp] = useState(false);
+  const [remDuration,    setRemDuration]    = useState(30);
+  const [watching,       setWatching]       = useState(!!contact.watching);
+  const [watchPending,   setWatchPending]   = useState(false);
+  const [copied,         setCopied]         = useState(false);
+  const [showEdit,       setShowEdit]       = useState(false);
+  const [showNotes,      setShowNotes]      = useState(false);
+  const [localContact,   setLocalContact]   = useState(contact);
 
-  const isCalled = !!(localCalledAt);
-  const score = getScore(dp);
-  const address = dp.address ? `${dp.address}${dp.suburb ? ', ' + dp.suburb : ''}` : (dp.suburb || '');
-  const contactId = dp.contact_id || dp.id;
+  useEffect(() => { if (autoExpand) setExpanded(true); }, [autoExpand]);
+
+  const contactId     = localContact.contact_id || localContact.id;
+  const score         = getScore(localContact);
+  const address       = localContact.address
+    ? `${localContact.address}${localContact.suburb ? ', ' + localContact.suburb : ''}`
+    : (localContact.suburb || '');
+  const contextLabel  = CONTEXT_LABELS[context] || 'Call';
+  const isCircle      = context === 'circle';
+
+  const buildNotePrefix = useCallback((outcomeFn) => {
+    const outcomeLabel = OUTCOME_LABELS[outcomeFn] || outcomeFn;
+    const addr = localContact.address || '';
+    return `${contextLabel}${addr ? ' \u2014 ' + addr : ''} | ${outcomeLabel}`;
+  }, [contextLabel, localContact.address]);
 
   const logOutcome = useCallback(async (outcome) => {
     setLogging(true);
     try {
-      const res = await apiFetch(`/api/plan/${contactId}/outcome`, token, {
-        method: 'PATCH',
-        body: JSON.stringify({ outcome, notes: note })
-      });
-      if (res.ok) {
+      const prefix   = buildNotePrefix(outcome);
+      const fullNote = userNote.trim() ? `${prefix} \u2014 ${userNote.trim()}` : prefix;
+
+      if (isCircle) {
+        const res = await apiFetch(`/api/plan/${contactId}/outcome`, token, {
+          method: 'PATCH',
+          body: JSON.stringify({ outcome, notes: fullNote })
+        });
+        if (res.ok) {
+          setLocalOutcome(outcome);
+          setLocalCalledAt(new Date().toISOString());
+          setShowNote(false);
+          if (onLogged) onLogged();
+        }
+      } else {
+        if (contactId) {
+          await apiFetch('/api/log-call', token, {
+            method: 'POST',
+            body: JSON.stringify({ contact_id: contactId, outcome, notes: fullNote })
+          });
+        }
         setLocalOutcome(outcome);
         setLocalCalledAt(new Date().toISOString());
-        setShowNote(false);
-        if (onLogged) onLogged();
+        if (onLogged) onLogged(contactId, outcome);
       }
-    } catch (err) {
-      console.error('Log outcome failed', err);
-    } finally {
-      setLogging(false);
-    }
-  }, [contactId, token, note, onLogged]);
+
+      if (outcome === 'connected' || outcome === 'left_message' || outcome === 'callback_requested') {
+        setShowFollowUp(true);
+        setFollowUpDays(outcome === 'left_message' ? 2 : 1);
+      }
+      if (typeof CallStatsBar.refresh === 'function') CallStatsBar.refresh();
+    } catch (err) { console.error('log outcome failed', err); }
+    finally { setLogging(false); }
+  }, [contactId, token, userNote, isCircle, buildNotePrefix, onLogged]);
+
+  const saveFollowUp = useCallback(async () => {
+    setSavingFollowUp(true);
+    try {
+      const d = new Date();
+      d.setDate(d.getDate() + followUpDays);
+      d.setHours(9, 0, 0, 0);
+      await apiFetch('/api/reminders', token, {
+        method: 'POST',
+        body: JSON.stringify({
+          contact_id:       contactId,
+          contact_name:     localContact.name,
+          contact_mobile:   localContact.mobile,
+          note:             followUpNote || `Follow up \u2014 ${OUTCOME_LABELS[localOutcome] || localOutcome}`,
+          fire_at:          d.toISOString(),
+          duration_minutes: remDuration,
+        })
+      });
+      setShowFollowUp(false);
+    } catch (err) { console.error('save follow-up failed', err); }
+    finally { setSavingFollowUp(false); }
+  }, [contactId, localContact, token, followUpDays, followUpNote, localOutcome, remDuration]);
+
+  const toggleWatch = useCallback(async () => {
+    if (!contactId || !eventAddress) return;
+    setWatchPending(true);
+    try {
+      const method = watching ? 'DELETE' : 'POST';
+      const res = await apiFetch('/api/listing-watchers', token, {
+        method, body: JSON.stringify({ contact_id: contactId, address: eventAddress })
+      });
+      if (res.ok) setWatching(w => !w);
+    } catch (err) { console.error('toggleWatch', err); }
+    finally { setWatchPending(false); }
+  }, [contactId, eventAddress, watching, token]);
+
+  const notePreFill = showNotes
+    ? `${contextLabel}${localContact.address ? ' \u2014 ' + localContact.address : ''} | `
+    : '';
+
+  const isCalled = !!localCalledAt;
 
   return (
     <div
-        className={`contact-card${isCalled ? ' called' : ''}`}
-        style={{ animationDelay: `${(index || 0) * 0.04}s` }}
-      >
-        {/* Header */}
-        <div className="card-header">
-          <div className="card-score-badge">
-            <span className="score-number">{fmtScore(score)}</span>
-            <span className="score-label">score</span>
-          </div>
-          <div className="card-meta">
-            <div className="card-name">{dp.name || 'Unknown'}</div>
-            <div className="card-address">{address}</div>
-          </div>
-          <div className="card-actions-header">
-            {dp.mobile && (
-              <>
-                <a className="call-btn" href={`tel:${dp.mobile}`}>
-                  <Phone size={12} />
-                  {dp.mobile}
-                </a>
-                <a className="expand-btn" href={smsHref(dp.mobile)} title="Send iMessage/SMS" style={{ color: '#3b82f6' }}>
-                  <MessageSquare size={14} />
-                </a>
-                <button
-                  className="expand-btn"
-                  onClick={() => { navigator.clipboard.writeText(dp.mobile); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-                  title={copied ? 'Copied!' : 'Copy number'}
-                  style={{ color: copied ? '#22c55e' : 'var(--text-muted)' }}
-                >
-                  <Copy size={14} />
-                </button>
-              </>
+      className={`prospect-card${isCalled ? ' prospect-card--called' : ''}`}
+      style={{ animationDelay: `${(index || 0) * 0.04}s` }}
+    >
+      {/* Header row */}
+      <div className="prospect-card-top">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {isCircle && score > 0 && (
+            <div className="card-score-badge" style={{ flexShrink: 0 }}>
+              <span className="score-number">{fmtScore(score)}</span>
+            </div>
+          )}
+          <div>
+            <div className="prospect-card-name">{localContact.name || 'Unknown'}</div>
+            {localContact.address && (
+              <div className="prospect-addr">{localContact.address}</div>
             )}
-            <button className="expand-btn" onClick={() => setShowReminder(true)} title="Set Reminder">
-              <Bell size={14} />
-            </button>
-            <button className="expand-btn" onClick={() => setExpanded(e => !e)}>
-              {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-            </button>
           </div>
         </div>
-
-        {/* Score Pills */}
-        <ScorePills
-          score={score}
-          tenureYears={dp.tenure_years || dp.contact_tenure_years}
-          occupancy={dp.occupancy || dp.contact_occupancy}
-          propensityScore={dp.propensity_score}
-          pfEstimate={dp.pricefinder_estimate}
-          contactClass={dp.contact_class}
-        />
-
-        {/* Expandable Body */}
-        {expanded && (
-          <div className="card-body">
-            {dp.intel && (
-              <div className="intel-section">
-                <div className="intel-label">Intel</div>
-                <div className="intel-bullets">{dp.intel}</div>
-              </div>
-            )}
-            {dp.angle && (
-              <div className="angle-box">
-                <div className="angle-box-label">Talking Points</div>
-                <div className="angle-box-text">{dp.angle}</div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Outcome Section */}
-        <div className="outcome-section">
-          {isCalled ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <div className="called-badge">
-                <Check size={10} />
-                Called {timeAgo(localCalledAt)}
-              </div>
-              {localOutcome && (
-                <span className={`outcome-chip chip-${localOutcome.replace(/\s/g, '_')}`}>
-                  {OUTCOME_LABELS[localOutcome] || localOutcome}
-                </span>
-              )}
-              <button
-                className="icon-btn"
-                style={{ marginLeft: 'auto', fontSize: 10, padding: '3px 8px', gap: 4, display: 'flex', alignItems: 'center' }}
-                onClick={() => { setLocalCalledAt(null); setLocalOutcome(null); setExpanded(true); }}
-                title="Re-log"
-              >
-                <RefreshCw size={10} /> Re-log
-              </button>
-            </div>
-          ) : (
+        <div className="prospect-card-right">
+          {localContact.distance != null && (
+            <span className="prospect-dist">{localContact.distance}m</span>
+          )}
+          {localContact.mobile && (
             <>
-              <div className="outcome-label">Log Outcome</div>
-              <div className="quick-log-grid">
-                <button className="quick-btn connected" onClick={() => logOutcome('connected')} disabled={logging}>Connected</button>
-                <button className="quick-btn message" onClick={() => { setShowNote(true); logOutcome('left_message'); }} disabled={logging}>Left Message</button>
-                <button className="quick-btn noanswer" onClick={() => logOutcome('no_answer')} disabled={logging}>No Answer</button>
-                <button className="quick-btn notint" onClick={() => logOutcome('not_interested')} disabled={logging}>Not Interested</button>
-                <button className="quick-btn callback" onClick={() => logOutcome('callback_requested')} disabled={logging}>Callback</button>
-                <button className="quick-btn appraisal" onClick={() => logOutcome('appraisal_booked')} disabled={logging}>
-                  Appraisal Booked
-                </button>
-              </div>
-              {showNote && (
-                <textarea
-                  className="outcome-note-input"
-                  rows={2}
-                  placeholder="Add a note (optional)..."
-                  value={note}
-                  onChange={e => setNote(e.target.value)}
-                />
-              )}
+              <a className="prospect-tel" href={`tel:${localContact.mobile}`}>
+                <Phone size={11} />{localContact.mobile}
+              </a>
+              <a className="prospect-sms" href={smsHref(localContact.mobile)} title="Send iMessage/SMS">
+                <MessageSquare size={12} />
+              </a>
               <button
-                className="icon-btn"
-                style={{ marginTop: 4, fontSize: 10, padding: '3px 8px', gap: 4, display: 'flex', alignItems: 'center' }}
-                onClick={() => setShowNote(n => !n)}
+                className="prospect-copy"
+                onClick={() => { navigator.clipboard.writeText(localContact.mobile); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+                title={copied ? 'Copied!' : 'Copy number'}
               >
-                <MessageSquare size={10} /> {showNote ? 'Hide note' : 'Add note'}
+                {copied ? <Check size={12} /> : <Copy size={12} />}
               </button>
             </>
           )}
+          <button
+            className="prospect-edit-btn"
+            onClick={e => { e.stopPropagation(); setShowEdit(true); }}
+            title="Edit contact"
+          ><FileEdit size={11} /></button>
+          <button
+            className="prospect-notes-btn"
+            onClick={e => { e.stopPropagation(); setShowNotes(true); }}
+            title="Notes &amp; history"
+          ><ClipboardList size={11} /></button>
+          {context === 'listed' && contactId && (
+            <button
+              className={`watcher-toggle${watching ? ' watcher-toggle--active' : ''}`}
+              onClick={e => { e.stopPropagation(); toggleWatch(); }}
+              disabled={watchPending}
+              title={watching ? 'Remove result watcher' : 'Mark as wants result update'}
+            ><Bell size={11} /></button>
+          )}
+          {isCircle && (
+            <button className="expand-btn" onClick={() => setExpanded(e => !e)}>
+              {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            </button>
+          )}
         </div>
+      </div>
 
-      {showReminder && (
-        <ReminderModal contact={dp} token={token} onClose={() => setShowReminder(false)} />
+      {/* Score pills (circle only) */}
+      {isCircle && (
+        <ScorePills
+          score={score}
+          tenureYears={localContact.tenure_years || localContact.contact_tenure_years}
+          occupancy={localContact.occupancy || localContact.contact_occupancy}
+          propensityScore={localContact.propensity_score}
+          pfEstimate={localContact.pricefinder_estimate}
+          contactClass={localContact.contact_class}
+        />
+      )}
+
+      {/* Intel / talking points (circle only, expandable) */}
+      {isCircle && expanded && (
+        <div className="card-body">
+          {localContact.intel && (
+            <div className="intel-section">
+              <div className="intel-label">Intel</div>
+              <div className="intel-bullets">{localContact.intel}</div>
+            </div>
+          )}
+          {localContact.angle && (
+            <div className="angle-box">
+              <div className="angle-box-label">Talking Points</div>
+              <div className="angle-box-text">{localContact.angle}</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Snoozed label */}
+      {localContact.status === 'snoozed' && localContact.snooze_until && (
+        <div className="prospect-snoozed">
+          Retry {new Date(localContact.snooze_until).toLocaleDateString('en-AU', {
+            weekday: 'short', day: 'numeric', month: 'short'
+          })}
+        </div>
+      )}
+
+      {/* Outcome section */}
+      {isCalled ? (
+        <div className="prospect-logged">
+          <Check size={10} />
+          {localOutcome && <span>{OUTCOME_LABELS[localOutcome] || localOutcome}</span>}
+          <span className="prospect-called-time">{timeAgo(localCalledAt)}</span>
+          <button className="prospect-relog" onClick={() => { setLocalOutcome(null); setLocalCalledAt(null); setShowFollowUp(false); }}>Re-log</button>
+        </div>
+      ) : (
+        <div className="outcome-section">
+          <div className="outcome-label">Log Outcome</div>
+          <div className="prospect-quick-btns">
+            <button className="pq-btn pq-connected"  onClick={() => logOutcome('connected')}          disabled={logging}>Connected</button>
+            <button className="pq-btn pq-message"    onClick={() => logOutcome('left_message')}       disabled={logging}>Left Message</button>
+            <button className="pq-btn pq-noanswer"   onClick={() => logOutcome('no_answer')}          disabled={logging}>No Answer</button>
+            <button className="pq-btn pq-notint"     onClick={() => logOutcome('not_interested')}     disabled={logging}>Not Interested</button>
+            <button className="pq-btn pq-callback"   onClick={() => logOutcome('callback_requested')} disabled={logging}>Callback</button>
+            <button className="pq-btn pq-appraisal"  onClick={() => logOutcome('appraisal_booked')}   disabled={logging}>Appraisal</button>
+          </div>
+          <button
+            className="icon-btn"
+            style={{ marginTop: 4, fontSize: 10, padding: '3px 8px', gap: 4, display: 'flex', alignItems: 'center' }}
+            onClick={() => setShowNote(n => !n)}
+          >
+            <MessageSquare size={10} /> {showNote ? 'Hide note' : 'Add note'}
+          </button>
+          {showNote && (
+            <textarea
+              className="outcome-note-input"
+              rows={2}
+              placeholder="Additional note (optional)\u2026"
+              value={userNote}
+              onChange={e => setUserNote(e.target.value)}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Follow-up prompt */}
+      {showFollowUp && (
+        <div className="followup-prompt">
+          <div className="followup-label">Follow up in:</div>
+          <div className="followup-row">
+            {[[1,'Tomorrow'],[2,'2 Days'],[7,'1 Week']].map(([days, label]) => (
+              <button key={days}
+                className={`followup-quick${followUpDays === days ? ' active' : ''}`}
+                onClick={() => setFollowUpDays(days)}>{label}</button>
+            ))}
+          </div>
+          <div className="reminder-duration-row">
+            <span className="reminder-duration-label">Duration:</span>
+            {DURATION_OPTIONS.map(opt => (
+              <button key={opt.value}
+                className={`duration-quick${remDuration === opt.value ? ' active' : ''}`}
+                onClick={() => setRemDuration(opt.value)}>{opt.label}</button>
+            ))}
+          </div>
+          <input className="followup-note-input" type="text"
+            placeholder="Follow-up note (optional)\u2026"
+            value={followUpNote} onChange={e => setFollowUpNote(e.target.value)} />
+          <div className="followup-actions">
+            <button className="followup-skip" onClick={() => setShowFollowUp(false)}>Skip</button>
+            <button className="followup-save" onClick={saveFollowUp} disabled={savingFollowUp}>
+              {savingFollowUp ? 'Saving\u2026' : 'Save Follow-up'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Edit modal */}
+      {showEdit && localContact.id && (
+        <EditContactModal
+          contact={localContact}
+          token={token}
+          onSaved={updated => setLocalContact(prev => ({ ...prev, ...updated }))}
+          onClose={() => setShowEdit(false)}
+        />
+      )}
+
+      {/* Notes modal — pre-filled with context label */}
+      {showNotes && (
+        <ContactNotesModal
+          contact={localContact}
+          token={token}
+          prefilledNote={notePreFill}
+          onClose={() => setShowNotes(false)}
+        />
       )}
     </div>
   );
@@ -509,6 +655,7 @@ function TierSection({ tier, contacts, token, onLogged, activeContactId, default
               contact={c}
               token={token}
               onLogged={onLogged}
+              context="circle"
               autoExpand={activeContactId && (c.contact_id === activeContactId || c.id === activeContactId)}
               index={i}
             />
@@ -594,10 +741,10 @@ const DURATION_OPTIONS = [
   { label: '2 hours', value: 120 },
 ];
 
-function ContactNotesModal({ contact, token, onClose }) {
+function ContactNotesModal({ contact, token, onClose, prefilledNote = '' }) {
   const [notes,        setNotes]        = useState([]);
   const [history,      setHistory]      = useState([]);
-  const [noteText,     setNoteText]     = useState('');
+  const [noteText,     setNoteText]     = useState(prefilledNote);
   const [saving,       setSaving]       = useState(false);
   const [loading,      setLoading]      = useState(true);
   const [showReminder, setShowReminder] = useState(false);
@@ -738,204 +885,7 @@ function ContactNotesModal({ contact, token, onClose }) {
   );
 }
 
-// ── Prospect Card (Just Sold / Just Listed contacts) ───────────────────────
-function ProspectCard({ contact, onLogged, token, eventType, eventAddress }) {
-  const [localOutcome, setLocalOutcome] = useState(contact.outcome || null);
-  const [logging, setLogging] = useState(false);
-  const [showFollowUp, setShowFollowUp] = useState(false);
-  const [followUpDays, setFollowUpDays] = useState(1);
-  const [followUpNote, setFollowUpNote] = useState('');
-  const [savingFollowUp, setSavingFollowUp] = useState(false);
-  const [watching, setWatching]     = useState(!!contact.watching);
-  const [watchPending, setWatchPending] = useState(false);
-  const [copied, setCopied]         = useState(false);
-  const [showEdit,     setShowEdit]     = useState(false);
-  const [showNotes,    setShowNotes]    = useState(false);
-  const [localContact, setLocalContact] = useState(contact);
-  const [remDuration,  setRemDuration]  = useState(30);
-
-  const logCall = useCallback(async (outcome) => {
-    setLogging(true);
-    try {
-      const body = { contact_id: contact.id || contact.name, outcome };
-      if (contact.id) {
-        await apiFetch('/api/log-call', token, {
-          method: 'POST',
-          body: JSON.stringify(body)
-        });
-      }
-      setLocalOutcome(outcome);
-      if (outcome === 'callback_requested' || outcome === 'connected' || outcome === 'left_message') {
-        setShowFollowUp(true);
-        setFollowUpDays(outcome === 'left_message' ? 2 : 1);
-      }
-      if (onLogged) onLogged(contact.id || contact.name, outcome);
-    } catch (err) { console.error('log-call failed', err); }
-    finally { setLogging(false); }
-  }, [contact, token, onLogged]);
-
-  const saveFollowUp = useCallback(async () => {
-    setSavingFollowUp(true);
-    try {
-      const d = new Date();
-      d.setDate(d.getDate() + followUpDays);
-      d.setHours(9, 0, 0, 0);
-      await apiFetch('/api/reminders', token, {
-        method: 'POST',
-        body: JSON.stringify({
-          contact_id: contact.id,
-          contact_name: contact.name,
-          contact_mobile: contact.mobile,
-          note: followUpNote || `Follow up — ${OUTCOME_LABELS[localOutcome] || localOutcome}`,
-          fire_at: d.toISOString(),
-          duration_minutes: remDuration
-        })
-      });
-      setShowFollowUp(false);
-    } catch (err) { console.error('save follow-up failed', err); }
-    finally { setSavingFollowUp(false); }
-  }, [contact, token, followUpNote, followUpDays, localOutcome, remDuration]);
-
-  const toggleWatch = useCallback(async () => {
-    if (!contact.id || !eventAddress) return;
-    setWatchPending(true);
-    try {
-      const method = watching ? 'DELETE' : 'POST';
-      const res = await apiFetch('/api/listing-watchers', token, {
-        method, body: JSON.stringify({ contact_id: contact.id, address: eventAddress })
-      });
-      if (res.ok) setWatching(w => !w);
-    } catch (err) { console.error('toggleWatch', err); }
-    finally { setWatchPending(false); }
-  }, [contact, eventAddress, watching, token]);
-
-  const isDimmed = !!localOutcome;
-
-  return (
-    <div className={`prospect-card${isDimmed ? ' prospect-card--called' : ''}`}>
-      <div className="prospect-card-top">
-        <div className="prospect-card-name">{localContact.name}</div>
-        <div className="prospect-card-right">
-          {contact.distance != null && (
-            <span className="prospect-dist">{contact.distance}m</span>
-          )}
-          {localContact.mobile && (
-            <>
-              <a className="prospect-tel" href={`tel:${localContact.mobile}`}>
-                <Phone size={11} />{localContact.mobile}
-              </a>
-              <a className="prospect-sms" href={smsHref(localContact.mobile)} title="Send iMessage/SMS">
-                <MessageSquare size={12} />
-              </a>
-              <button
-                className="prospect-copy"
-                onClick={() => { navigator.clipboard.writeText(localContact.mobile); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-                title={copied ? 'Copied!' : 'Copy number'}
-              >
-                {copied ? <Check size={12} /> : <Copy size={12} />}
-              </button>
-            </>
-          )}
-              <button
-                className="prospect-edit-btn"
-                onClick={e => { e.stopPropagation(); setShowEdit(true); }}
-                title="Edit contact"
-              ><FileEdit size={11} /></button>
-              <button
-                className="prospect-notes-btn"
-                onClick={e => { e.stopPropagation(); setShowNotes(true); }}
-                title="Notes &amp; history"
-              ><ClipboardList size={11} /></button>
-          {eventType === 'listing' && contact.id && (
-            <button
-              className={`watcher-toggle${watching ? ' watcher-toggle--active' : ''}`}
-              onClick={e => { e.stopPropagation(); toggleWatch(); }}
-              disabled={watchPending}
-              title={watching ? 'Remove result watcher' : 'Mark as wants result update'}
-            >
-              <Bell size={11} />
-            </button>
-          )}
-        </div>
-      </div>
-      {localContact.address && (
-        <div className="prospect-addr">{localContact.address}</div>
-      )}
-      {contact.status === 'snoozed' && contact.snooze_until && (
-        <div className="prospect-snoozed">
-          Retry {new Date(contact.snooze_until).toLocaleDateString('en-AU', {
-            weekday: 'short', day: 'numeric', month: 'short'
-          })}
-        </div>
-      )}
-      {localOutcome ? (
-        <div className="prospect-logged">
-          <Check size={10} />
-          <span>{OUTCOME_LABELS[localOutcome] || localOutcome}</span>
-          <button className="prospect-relog" onClick={() => { setLocalOutcome(null); setShowFollowUp(false); }}>Re-log</button>
-        </div>
-      ) : (
-        <div className="prospect-quick-btns">
-          <button className="pq-btn pq-connected" onClick={() => logCall('connected')} disabled={logging}>Connected</button>
-          <button className="pq-btn pq-message" onClick={() => logCall('left_message')} disabled={logging}>Left Message</button>
-          <button className="pq-btn pq-noanswer" onClick={() => logCall('no_answer')} disabled={logging}>Not Home</button>
-          <button className="pq-btn pq-notint" onClick={() => logCall('not_interested')} disabled={logging}>Not Interested</button>
-          <button className="pq-btn pq-callback" onClick={() => logCall('callback_requested')} disabled={logging}>Callback</button>
-        </div>
-      )}
-      {showFollowUp && (
-        <div className="followup-prompt">
-          <div className="followup-label">Follow up in:</div>
-          <div className="followup-row">
-            {[[1,'Tomorrow'], [2,'2 Days'], [7,'1 Week']].map(([days, label]) => (
-              <button
-                key={days}
-                className={`followup-quick${followUpDays === days ? ' active' : ''}`}
-                onClick={() => setFollowUpDays(days)}
-              >{label}</button>
-            ))}
-          </div>
-              <div className="reminder-duration-row">
-                <span className="reminder-duration-label">Duration:</span>
-                {DURATION_OPTIONS.map(opt => (
-                  <button key={opt.value}
-                    className={`duration-quick${remDuration === opt.value ? ' active' : ''}`}
-                    onClick={() => setRemDuration(opt.value)}>{opt.label}</button>
-                ))}
-              </div>
-          <input
-            className="followup-note-input"
-            type="text"
-            placeholder="Note (optional)..."
-            value={followUpNote}
-            onChange={e => setFollowUpNote(e.target.value)}
-          />
-          <div className="followup-actions">
-            <button className="followup-skip" onClick={() => setShowFollowUp(false)}>Skip</button>
-            <button className="followup-save" onClick={saveFollowUp} disabled={savingFollowUp}>
-              {savingFollowUp ? 'Saving…' : 'Save Follow-up'}
-            </button>
-          </div>
-        </div>
-      )}
-      {showEdit && localContact.id && (
-        <EditContactModal
-          contact={localContact}
-          token={token}
-          onSaved={updated => setLocalContact(prev => ({ ...prev, ...updated }))}
-          onClose={() => setShowEdit(false)}
-        />
-      )}
-      {showNotes && (
-        <ContactNotesModal
-          contact={localContact}
-          token={token}
-          onClose={() => setShowNotes(false)}
-        />
-      )}
-    </div>
-  );
-}
+// ProspectCard removed — unified ContactCard above handles all contexts
 
 // ── Event Group (collapsible group within Just Sold / Just Listed) ──────────
 function EventGroup({ alert, token, accentColor, defaultExpanded }) {
@@ -986,24 +936,24 @@ function EventGroup({ alert, token, accentColor, defaultExpanded }) {
                 <span>WANTS RESULT ({watchers.length})</span>
               </div>
               {watchers.map((w, i) => (
-                <ProspectCard
+                <ContactCard
                   key={`watcher-${w.id || i}`}
                   contact={w}
                   token={token}
                   onLogged={handleLogged}
-                  eventType="sold"
+                  context="sold"
                   eventAddress={alert.address}
                 />
               ))}
             </div>
           )}
           {visibleContacts.map((c, i) => (
-            <ProspectCard
+            <ContactCard
               key={c.id || c.name || i}
               contact={c}
               token={token}
               onLogged={handleLogged}
-              eventType={alert.type}
+              context={alert.type === 'sold' ? 'sold' : 'listed'}
               eventAddress={alert.address}
             />
           ))}
@@ -1164,7 +1114,7 @@ function CallsPage({ token, onReminderCountChange }) {
             {calledOpen && (
               <div className="tier-cards">
                 {called.map((c, i) => (
-                  <ContactCard key={c.id || c.contact_id || i} contact={c} token={token} onLogged={handleLogged} autoExpand={false} index={i} />
+                  <ContactCard key={c.id || c.contact_id || i} contact={c} token={token} onLogged={handleLogged} context="circle" autoExpand={false} index={i} />
                 ))}
               </div>
             )}
