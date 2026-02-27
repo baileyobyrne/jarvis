@@ -353,6 +353,151 @@ function isToday(isoString) {
   );
 }
 
+// ─── Buyer matching helpers ────────────────────────────────────────────────────
+
+function parsePriceToInt(priceStr) {
+  if (!priceStr) return null;
+  const s = String(priceStr).replace(/[$,\s]/g, '').toLowerCase();
+  if (s.includes('withheld') || s.includes('contact')) return null;
+  const mMatch = s.match(/^([\d.]+)\s*m/);
+  if (mMatch) return Math.round(parseFloat(mMatch[1]) * 1e6);
+  const kMatch = s.match(/^([\d.]+)\s*k/);
+  if (kMatch) return Math.round(parseFloat(kMatch[1]) * 1e3);
+  const num = parseFloat(s.replace(/[^0-9.]/g, ''));
+  return isNaN(num) ? null : Math.round(num);
+}
+
+function findMatchingBuyers(event) {
+  // event = { address, suburb, type, beds, baths, cars, property_type, price, id (market_event_id) }
+  const buyers = db.prepare("SELECT * FROM buyer_profiles WHERE status = 'active'").all();
+  if (buyers.length === 0) return [];
+
+  const eventSuburb = (event.suburb || '').toUpperCase().trim();
+  const eventBeds = event.beds ? parseInt(event.beds) : null;
+  const eventPriceNum = parsePriceToInt(event.price || event.confirmed_price);
+  const eventTypeLower = (event.property_type || '').toLowerCase();
+
+  const matches = [];
+
+  for (const buyer of buyers) {
+    // Parse buyer suburbs
+    let suburbsWanted = [];
+    try { suburbsWanted = JSON.parse(buyer.suburbs_wanted || '[]'); } catch (_) {}
+    const suburbsNorm = suburbsWanted.map(s => s.toUpperCase().trim());
+
+    // Suburb match — required unless buyer has no preferences
+    const suburbMatch = suburbsNorm.length === 0 || suburbsNorm.includes(eventSuburb);
+    if (!suburbMatch) continue;
+
+    // Check for recent duplicate match (last 14 days) for known event IDs
+    if (event.id) {
+      const recent = db.prepare(
+        "SELECT id FROM buyer_matches WHERE buyer_id = ? AND market_event_id = ? AND matched_at >= datetime('now', '-14 days')"
+      ).get(buyer.id, event.id);
+      if (recent) continue;
+    }
+
+    let score = 0;
+    const reasons = [];
+
+    // Suburb score
+    if (suburbsNorm.length === 0) {
+      score += 10; // no preference = soft match
+    } else {
+      score += 40;
+      reasons.push(`Suburb: ${eventSuburb}`);
+    }
+
+    // Beds score
+    if (eventBeds !== null && (buyer.beds_min || buyer.beds_max)) {
+      const bedsMin = buyer.beds_min || 0;
+      const bedsMax = buyer.beds_max || 99;
+      if (eventBeds >= bedsMin && eventBeds <= bedsMax) {
+        score += 30;
+        reasons.push(`${eventBeds}bd in range ${bedsMin}–${bedsMax}`);
+      } else {
+        score -= 10;
+      }
+    } else if (!buyer.beds_min && !buyer.beds_max) {
+      score += 10; // no preference
+    }
+
+    // Property type score
+    const buyerType = (buyer.property_type || 'any').toLowerCase();
+    if (buyerType === 'any' || !buyerType) {
+      score += 10;
+    } else if (eventTypeLower && eventTypeLower.includes(buyerType)) {
+      score += 20;
+      reasons.push(`Type: ${buyerType}`);
+    } else if (buyerType !== 'any' && eventTypeLower && !eventTypeLower.includes(buyerType)) {
+      score -= 5;
+    }
+
+    // Price score (10% tolerance)
+    if (eventPriceNum && (buyer.price_min || buyer.price_max)) {
+      const priceMin = buyer.price_min || 0;
+      const priceMax = buyer.price_max || Infinity;
+      if (eventPriceNum >= priceMin * 0.9 && eventPriceNum <= priceMax * 1.1) {
+        score += 25;
+        reasons.push(`Price $${(eventPriceNum/1e6).toFixed(2)}M in budget`);
+      } else if (eventPriceNum > priceMax * 1.1) {
+        score -= 15; // over budget
+      }
+      // Under budget: neutral
+    }
+
+    if (score > 0) {
+      matches.push({ buyer, matchScore: score, reasons });
+    }
+  }
+
+  matches.sort((a, b) => b.matchScore - a.matchScore);
+  return matches;
+}
+
+async function notifyBuyerMatches(matches, eventAddress, marketEventId) {
+  if (matches.length === 0) return;
+
+  const msgLines = matches.slice(0, 5).map(m => {
+    const parts = [m.buyer.name];
+    if (m.buyer.mobile) parts.push(m.buyer.mobile);
+    if (m.reasons.length) parts.push(`(${m.reasons.join(', ')})`);
+    return `• ${parts.join(' — ')}`;
+  });
+
+  const msg = `🏠 <b>BUYER MATCH — ${eventAddress}</b>\n\n${matches.length} active buyer profile${matches.length > 1 ? 's' : ''} match:\n${msgLines.join('\n')}${matches.length > 5 ? `\n...and ${matches.length - 5} more` : ''}\n\nCheck Buyers page to follow up.`;
+
+  // Send Telegram (non-blocking)
+  sendTelegramMessage(msg).catch(e => console.warn('[buyer-match] Telegram failed:', e.message));
+
+  // Record matches and create reminders
+  const insertMatch = db.prepare(
+    'INSERT OR IGNORE INTO buyer_matches (buyer_id, market_event_id, event_address, notified_telegram) VALUES (?, ?, ?, 1)'
+  );
+  const insertReminder = db.prepare(
+    "INSERT INTO reminders (contact_name, contact_mobile, note, fire_at, is_task) VALUES (?, ?, ?, datetime('now', '+1 day', 'start of day', '+9 hours'), 0)"
+  );
+  const updateMatch = db.prepare('UPDATE buyer_matches SET reminder_created=1, reminder_id=? WHERE buyer_id=? AND market_event_id=? AND event_address=?');
+
+  for (const m of matches) {
+    try {
+      const matchResult = insertMatch.run(m.buyer.id, marketEventId || null, eventAddress);
+      if (matchResult.changes > 0) {
+        const remId = insertReminder.run(
+          m.buyer.name,
+          m.buyer.mobile || null,
+          `Buyer match — call ${m.buyer.name} re: ${eventAddress}`
+        ).lastInsertRowid;
+        if (marketEventId) {
+          updateMatch.run(remId, m.buyer.id, marketEventId, eventAddress);
+        }
+      }
+    } catch (e) {
+      console.warn('[buyer-match] Failed to record match:', e.message);
+    }
+  }
+}
+
 // ─── Auth middleware ───────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
   const auth = req.headers['authorization'] || '';
@@ -2014,6 +2159,14 @@ app.post('/api/market-events/manual', requireAuth, async (req, res) => {
 
     console.log(`[POST /api/market-events/manual] ${type} @ ${normAddress} — ${topContacts.length} contacts, est=${pfEstimate}`);
     res.json({ ok: true, contactCount: topContacts.length, id: newEventId, pfEstimate });
+
+    // Trigger buyer matching async (after response sent)
+    setImmediate(async () => {
+      try {
+        const matches = findMatchingBuyers({ address: normAddress, suburb: detectedSuburb || '', type, beds, baths, cars, property_type, price, id: newEventId });
+        if (matches.length > 0) await notifyBuyerMatches(matches, normAddress, newEventId);
+      } catch (e) { console.warn('[buyer-match] manual event match failed:', e.message); }
+    });
   } catch (e) {
     console.error('[POST /api/market-events/manual]', e.message);
     res.status(500).json({ error: e.message });
@@ -2120,6 +2273,21 @@ app.patch('/api/market-events/:id', requireAuth, async (req, res) => {
     } catch (_) {}
 
     res.json({ ok: true, contactCount: topContacts.length });
+
+    // Trigger buyer matching async for listing events (after response sent)
+    if (newType === 'listing') {
+      setImmediate(async () => {
+        try {
+          const effectiveBeds = beds !== undefined ? beds : existing.beds;
+          const effectiveBaths = baths !== undefined ? baths : existing.baths;
+          const effectiveCars = cars !== undefined ? cars : existing.cars;
+          const effectivePt = property_type !== undefined ? property_type : existing.property_type;
+          const effectivePrice = price !== undefined ? price : existing.price;
+          const matches = findMatchingBuyers({ address: normAddress, suburb: newSuburb || '', type: newType, beds: effectiveBeds, baths: effectiveBaths, cars: effectiveCars, property_type: effectivePt, price: effectivePrice, id });
+          if (matches.length > 0) await notifyBuyerMatches(matches, normAddress, id);
+        } catch (e) { console.warn('[buyer-match] patch event match failed:', e.message); }
+      });
+    }
   } catch (e) {
     console.error('[PATCH /api/market-events/:id]', e.message);
     res.status(500).json({ error: e.message });
@@ -2498,6 +2666,196 @@ app.post('/api/plan/add', requireAuth, (req, res) => {
     res.json({ ok: true, added: r.changes > 0 });
   } catch (e) {
     console.error('[POST /api/plan/add]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Buyer Profiles ────────────────────────────────────────────────────────────
+
+// GET /api/buyer-profiles/matches/recent (static sub-path — must be before /:id)
+app.get('/api/buyer-profiles/matches/recent', requireAuth, (req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT bm.*, bp.name AS buyer_name, bp.mobile AS buyer_mobile
+      FROM buyer_matches bm
+      JOIN buyer_profiles bp ON bp.id = bm.buyer_id
+      WHERE bm.matched_at >= datetime('now', '-30 days')
+      ORDER BY bm.matched_at DESC
+      LIMIT 50
+    `).all();
+    res.json(rows);
+  } catch (e) {
+    console.error('[GET /api/buyer-profiles/matches/recent]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/buyer-profiles/match-event (static sub-path — must be before /:id)
+app.post('/api/buyer-profiles/match-event', requireAuth, async (req, res) => {
+  try {
+    const { address, suburb, type, beds, baths, cars, property_type, price, market_event_id } = req.body;
+    if (!address) return res.status(400).json({ error: 'address required' });
+    const matches = findMatchingBuyers({ address, suburb, type, beds, baths, cars, property_type, price, id: market_event_id });
+    if (matches.length > 0) {
+      await notifyBuyerMatches(matches, address, market_event_id || null);
+    }
+    res.json({ ok: true, matchCount: matches.length, matches: matches.map(m => ({ buyer_id: m.buyer.id, buyer_name: m.buyer.name, score: m.matchScore, reasons: m.reasons })) });
+  } catch (e) {
+    console.error('[POST /api/buyer-profiles/match-event]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/buyer-profiles — list buyers
+app.get('/api/buyer-profiles', requireAuth, (req, res) => {
+  try {
+    const VALID_STATUSES = ['active', 'paused', 'purchased', 'archived', 'all'];
+    const status = VALID_STATUSES.includes(req.query.status) ? req.query.status : 'active';
+    const where = status === 'all' ? '' : 'WHERE bp.status = ?';
+    const params = status === 'all' ? [] : [status];
+    const rows = db.prepare(`
+      SELECT bp.*,
+             COUNT(bm.id) AS recent_match_count
+      FROM buyer_profiles bp
+      LEFT JOIN buyer_matches bm
+        ON bm.buyer_id = bp.id
+        AND bm.matched_at >= datetime('now', '-30 days')
+      ${where}
+      GROUP BY bp.id
+      ORDER BY
+        CASE bp.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
+        bp.created_at DESC
+    `).all(...params);
+    res.json(rows.map(r => ({
+      ...r,
+      suburbs_wanted: (() => { try { return JSON.parse(r.suburbs_wanted || '[]'); } catch (_) { return []; } })()
+    })));
+  } catch (e) {
+    console.error('[GET /api/buyer-profiles]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/buyer-profiles — create a buyer profile
+app.post('/api/buyer-profiles', requireAuth, (req, res) => {
+  try {
+    const { name, mobile, email, address, suburb, contact_id,
+            price_min, price_max, beds_min, beds_max, property_type,
+            suburbs_wanted, timeframe, features, status, source, notes } = req.body;
+    if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
+    const r = db.prepare(`
+      INSERT INTO buyer_profiles
+        (name, mobile, email, address, suburb, contact_id,
+         price_min, price_max, beds_min, beds_max, property_type,
+         suburbs_wanted, timeframe, features, status, source, notes)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      name.trim(), mobile||null, email||null, address||null, suburb||null, contact_id||null,
+      price_min||null, price_max||null, beds_min||null, beds_max||null, property_type||null,
+      suburbs_wanted ? JSON.stringify(Array.isArray(suburbs_wanted) ? suburbs_wanted : [suburbs_wanted]) : null,
+      timeframe||null, features||null, status||'active', source||null, notes||null
+    );
+    const buyer = db.prepare('SELECT * FROM buyer_profiles WHERE id = ?').get(r.lastInsertRowid);
+    try { buyer.suburbs_wanted = JSON.parse(buyer.suburbs_wanted || '[]'); } catch (_) { buyer.suburbs_wanted = []; }
+    res.json({ ok: true, buyer });
+  } catch (e) {
+    console.error('[POST /api/buyer-profiles]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/buyer-profiles/:id — get one buyer with recent matches
+app.get('/api/buyer-profiles/:id', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const buyer = db.prepare('SELECT * FROM buyer_profiles WHERE id = ?').get(id);
+    if (!buyer) return res.status(404).json({ error: 'not found' });
+    try { buyer.suburbs_wanted = JSON.parse(buyer.suburbs_wanted || '[]'); } catch (_) { buyer.suburbs_wanted = []; }
+    const matches = db.prepare(
+      'SELECT * FROM buyer_matches WHERE buyer_id = ? ORDER BY matched_at DESC LIMIT 20'
+    ).all(id);
+    res.json({ ...buyer, matches });
+  } catch (e) {
+    console.error('[GET /api/buyer-profiles/:id]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PATCH /api/buyer-profiles/:id — edit a buyer profile
+app.patch('/api/buyer-profiles/:id', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const existing = db.prepare('SELECT id FROM buyer_profiles WHERE id = ?').get(id);
+    if (!existing) return res.status(404).json({ error: 'not found' });
+    const ALLOWED = ['name','mobile','email','address','suburb','contact_id',
+                     'price_min','price_max','beds_min','beds_max','property_type',
+                     'suburbs_wanted','timeframe','features','status','source','notes'];
+    const sets = ["updated_at = datetime('now','localtime')"], vals = [];
+    for (const key of ALLOWED) {
+      if (req.body[key] !== undefined) {
+        sets.push(`${key} = ?`);
+        const v = req.body[key];
+        if (key === 'suburbs_wanted') {
+          vals.push(v ? JSON.stringify(Array.isArray(v) ? v : [v]) : null);
+        } else {
+          vals.push(v === '' ? null : v);
+        }
+      }
+    }
+    vals.push(id);
+    db.prepare(`UPDATE buyer_profiles SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    const buyer = db.prepare('SELECT * FROM buyer_profiles WHERE id = ?').get(id);
+    try { buyer.suburbs_wanted = JSON.parse(buyer.suburbs_wanted || '[]'); } catch (_) { buyer.suburbs_wanted = []; }
+    res.json({ ok: true, buyer });
+  } catch (e) {
+    console.error('[PATCH /api/buyer-profiles/:id]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/buyer-profiles/:id — soft-archive
+app.delete('/api/buyer-profiles/:id', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const result = db.prepare(
+      "UPDATE buyer_profiles SET status='archived', updated_at=datetime('now','localtime') WHERE id = ?"
+    ).run(id);
+    if (result.changes === 0) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[DELETE /api/buyer-profiles/:id]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/buyer-profiles/:id/log-call — log a call outcome for a buyer
+app.post('/api/buyer-profiles/:id/log-call', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const { outcome, notes } = req.body;
+    const VALID_OUTCOMES = ['connected','left_message','no_answer','not_interested',
+                            'callback_requested','appraisal_booked','wrong_number'];
+    if (!VALID_OUTCOMES.includes(outcome)) return res.status(400).json({ error: 'invalid outcome' });
+    const buyer = db.prepare('SELECT id, contact_id FROM buyer_profiles WHERE id = ?').get(id);
+    if (!buyer) return res.status(404).json({ error: 'not found' });
+    db.prepare(`
+      UPDATE buyer_profiles
+      SET last_contacted_at = datetime('now','localtime'),
+          last_outcome = ?,
+          updated_at = datetime('now','localtime')
+      WHERE id = ?
+    `).run(outcome, id);
+    if (buyer.contact_id) {
+      db.prepare(`INSERT INTO call_log (contact_id, called_at, outcome, notes) VALUES (?, datetime('now','localtime'), ?, ?)`)
+        .run(buyer.contact_id, outcome, notes || null);
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[POST /api/buyer-profiles/:id/log-call]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
