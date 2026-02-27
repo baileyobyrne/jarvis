@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const { db }  = require('./lib/db.js');
 const multer  = require('multer');
 const axios   = require('axios');
+const { createCalendarEvent } = require('./lib/ical-calendar.js');
 const upload  = multer({ dest: '/root/.openclaw/workspace/intel/' });
 
 const app  = express();
@@ -923,13 +924,25 @@ app.patch('/api/plan/:contactId/outcome', requireAuth, (req, res) => {
 });
 
 // POST /api/reminders
-app.post('/api/reminders', requireAuth, (req, res) => {
+app.post('/api/reminders', requireAuth, async (req, res) => {
   try {
-    const { contact_id, contact_name, contact_mobile, note, fire_at } = req.body;
+    const { contact_id, contact_name, contact_mobile, note, fire_at, duration_minutes } = req.body;
+    const dur = duration_minutes ? parseInt(duration_minutes, 10) : 30;
     db.prepare(`
-      INSERT INTO reminders (contact_id, contact_name, contact_mobile, note, fire_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(contact_id, contact_name, contact_mobile, note, fire_at);
+      INSERT INTO reminders (contact_id, contact_name, contact_mobile, note, fire_at, duration_minutes)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(contact_id, contact_name, contact_mobile, note, fire_at, dur);
+
+    // iCloud CalDAV sync — fire-and-forget, never blocks the response
+    createCalendarEvent({
+      contact_name:     contact_name || 'Unknown',
+      contact_mobile:   contact_mobile || null,
+      contact_address:  null,
+      note:             note || '',
+      fire_at,
+      duration_minutes: dur,
+    }).catch(() => {});
+
     res.json({ ok: true });
   } catch (e) {
     console.error('[POST /api/reminders]', e.message);
