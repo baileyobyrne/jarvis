@@ -1107,14 +1107,17 @@ app.patch('/api/contacts/:id', requireAuth, (req, res) => {
     const vals = [];
     for (const key of ALLOWED) {
       if (req.body[key] !== undefined) {
+        let val = req.body[key];
+        if (key === 'do_not_call') val = val ? 1 : 0;
         sets.push(`${key} = ?`);
-        vals.push(req.body[key]);
+        vals.push(val);
       }
     }
     if (sets.length === 0) return res.status(400).json({ error: 'No valid fields provided' });
     sets.push(`updated_at = datetime('now','localtime')`);
     vals.push(id);
-    db.prepare(`UPDATE contacts SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    const info = db.prepare(`UPDATE contacts SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    if (info.changes === 0) return res.status(404).json({ error: 'Contact not found' });
     const updated = db.prepare(
       'SELECT id, name, mobile, address, suburb, do_not_call FROM contacts WHERE id = ?'
     ).get(id);
