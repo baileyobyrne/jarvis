@@ -953,13 +953,19 @@ app.get('/api/reminders/upcoming', requireAuth, (req, res) => {
 // GET /api/market
 app.get('/api/market', requireAuth, (req, res) => {
   try {
-    const days              = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 365);
+    const days              = Math.min(Math.max(parseInt(req.query.days) || 14, 1), 365);
     const includeHistorical = req.query.include_historical === '1' || req.query.include_historical === 'true';
+    const statusFilter      = req.query.status || 'all';
+
+    const statusWhere = statusFilter !== 'all'
+      ? `AND COALESCE(status, CASE WHEN type='sold' THEN 'sold' WHEN type='unlisted' THEN 'withdrawn' ELSE 'active' END) = '${statusFilter}'`
+      : '';
 
     const liveRows = db.prepare(`
       SELECT *, 'market_event' AS record_source FROM market_events
       WHERE detected_at >= datetime('now', '-' || ? || ' days')
-      ORDER BY detected_at DESC LIMIT 100
+      ${statusWhere}
+      ORDER BY detected_at DESC LIMIT 200
     `).all(String(days));
 
     // Build pf_estimate lookup map from properties table (normalise street type abbreviations)
