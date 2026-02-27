@@ -749,6 +749,10 @@ function ProspectCard({ contact, onLogged, token, eventType, eventAddress }) {
   const [watching, setWatching]     = useState(!!contact.watching);
   const [watchPending, setWatchPending] = useState(false);
   const [copied, setCopied]         = useState(false);
+  const [showEdit,     setShowEdit]     = useState(false);
+  const [showNotes,    setShowNotes]    = useState(false);
+  const [localContact, setLocalContact] = useState(contact);
+  const [remDuration,  setRemDuration]  = useState(30);
 
   const logCall = useCallback(async (outcome) => {
     setLogging(true);
@@ -783,13 +787,14 @@ function ProspectCard({ contact, onLogged, token, eventType, eventAddress }) {
           contact_name: contact.name,
           contact_mobile: contact.mobile,
           note: followUpNote || `Follow up — ${OUTCOME_LABELS[localOutcome] || localOutcome}`,
-          fire_at: d.toISOString()
+          fire_at: d.toISOString(),
+          duration_minutes: remDuration
         })
       });
       setShowFollowUp(false);
     } catch (err) { console.error('save follow-up failed', err); }
     finally { setSavingFollowUp(false); }
-  }, [contact, token, followUpNote, followUpDays, localOutcome]);
+  }, [contact, token, followUpNote, followUpDays, localOutcome, remDuration]);
 
   const toggleWatch = useCallback(async () => {
     if (!contact.id || !eventAddress) return;
@@ -809,28 +814,38 @@ function ProspectCard({ contact, onLogged, token, eventType, eventAddress }) {
   return (
     <div className={`prospect-card${isDimmed ? ' prospect-card--called' : ''}`}>
       <div className="prospect-card-top">
-        <div className="prospect-card-name">{contact.name}</div>
+        <div className="prospect-card-name">{localContact.name}</div>
         <div className="prospect-card-right">
           {contact.distance != null && (
             <span className="prospect-dist">{contact.distance}m</span>
           )}
-          {contact.mobile && (
+          {localContact.mobile && (
             <>
-              <a className="prospect-tel" href={`tel:${contact.mobile}`}>
-                <Phone size={11} />{contact.mobile}
+              <a className="prospect-tel" href={`tel:${localContact.mobile}`}>
+                <Phone size={11} />{localContact.mobile}
               </a>
-              <a className="prospect-sms" href={smsHref(contact.mobile)} title="Send iMessage/SMS">
+              <a className="prospect-sms" href={smsHref(localContact.mobile)} title="Send iMessage/SMS">
                 <MessageSquare size={12} />
               </a>
               <button
                 className="prospect-copy"
-                onClick={() => { navigator.clipboard.writeText(contact.mobile); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+                onClick={() => { navigator.clipboard.writeText(localContact.mobile); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
                 title={copied ? 'Copied!' : 'Copy number'}
               >
                 {copied ? <Check size={12} /> : <Copy size={12} />}
               </button>
             </>
           )}
+              <button
+                className="prospect-edit-btn"
+                onClick={e => { e.stopPropagation(); setShowEdit(true); }}
+                title="Edit contact"
+              ><FileEdit size={11} /></button>
+              <button
+                className="prospect-notes-btn"
+                onClick={e => { e.stopPropagation(); setShowNotes(true); }}
+                title="Notes &amp; history"
+              ><ClipboardList size={11} /></button>
           {eventType === 'listing' && contact.id && (
             <button
               className={`watcher-toggle${watching ? ' watcher-toggle--active' : ''}`}
@@ -843,8 +858,8 @@ function ProspectCard({ contact, onLogged, token, eventType, eventAddress }) {
           )}
         </div>
       </div>
-      {contact.address && (
-        <div className="prospect-addr">{contact.address}</div>
+      {localContact.address && (
+        <div className="prospect-addr">{localContact.address}</div>
       )}
       {contact.status === 'snoozed' && contact.snooze_until && (
         <div className="prospect-snoozed">
@@ -880,6 +895,14 @@ function ProspectCard({ contact, onLogged, token, eventType, eventAddress }) {
               >{label}</button>
             ))}
           </div>
+              <div className="reminder-duration-row">
+                <span className="reminder-duration-label">Duration:</span>
+                {DURATION_OPTIONS.map(opt => (
+                  <button key={opt.value}
+                    className={`duration-quick${remDuration === opt.value ? ' active' : ''}`}
+                    onClick={() => setRemDuration(opt.value)}>{opt.label}</button>
+                ))}
+              </div>
           <input
             className="followup-note-input"
             type="text"
@@ -894,6 +917,21 @@ function ProspectCard({ contact, onLogged, token, eventType, eventAddress }) {
             </button>
           </div>
         </div>
+      )}
+      {showEdit && localContact.id && (
+        <EditContactModal
+          contact={localContact}
+          token={token}
+          onSaved={updated => setLocalContact(prev => ({ ...prev, ...updated }))}
+          onClose={() => setShowEdit(false)}
+        />
+      )}
+      {showNotes && (
+        <ContactNotesModal
+          contact={localContact}
+          token={token}
+          onClose={() => setShowNotes(false)}
+        />
       )}
     </div>
   );
