@@ -846,13 +846,11 @@ body::before {
   flex-shrink: 0;
 }
 
-/* ── Buyer Call List ─────────────────────────────────────────────────────── */
+/* ── Buyer Call List (legacy — kept for .listing-group etc styles below) ─── */
 .buyers-toolbar {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding-bottom: 16px;
-  border-bottom: var(--border-gold);
   margin-bottom: 20px;
   flex-wrap: wrap;
 }
@@ -3119,4 +3117,122 @@ body::before {
   background: var(--gold) !important;
   color: var(--bg-base) !important;
   border-color: var(--gold) !important;
+}
+
+/* ─── Buyers CRM Page ─────────────────────────────────── */
+.buyers-crm-page { padding: 0; }
+
+.buyers-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.buyers-view-toggle { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.view-tab {
+  padding: 7px 16px;
+  font-size: 12px; font-family: var(--font-mono);
+  background: var(--bg-card); color: var(--text-muted);
+  border: none; cursor: pointer;
+  display: flex; align-items: center; gap: 6px;
+  transition: background .15s, color .15s;
+}
+.view-tab--active { background: var(--bg-raised); color: var(--text-primary); }
+.view-tab-count {
+  background: var(--bg-surface); color: var(--text-muted);
+  font-size: 10px; padding: 1px 5px; border-radius: 4px;
+}
+.match-count { background: rgba(201,168,76,.15); color: var(--gold); }
+
+.buyers-status-filter { display: flex; gap: 6px; flex-wrap: wrap; }
+.status-filter-btn {
+  padding: 5px 10px; font-size: 11px; font-family: var(--font-mono);
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-card); color: var(--text-muted); cursor: pointer;
+  text-transform: capitalize; transition: all .15s;
+}
+.status-filter-btn.active { border-color: var(--gold); color: var(--gold); background: rgba(201,168,76,.08); }
+.status-filter-btn:hover { border-color: var(--gold); color: var(--text-primary); }
+
+.buyers-add-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 14px; font-size: 12px; font-family: var(--font-mono);
+  border: 1px solid var(--gold); border-radius: 6px;
+  background: rgba(201,168,76,.08); color: var(--gold);
+  cursor: pointer; margin-left: auto; transition: background .15s;
+}
+.buyers-add-btn:hover { background: rgba(201,168,76,.18); }
+
+.buyer-card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;
+  transition: border-color .15s;
+}
+.buyer-card:hover { border-color: var(--gold-border); }
+
+.buyer-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.buyer-card-info { flex: 1; min-width: 0; }
+.buyer-card-name { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.buyer-card-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+.buyer-meta-chip {
+  font-size: 11px; padding: 2px 8px; border-radius: 4px;
+  background: var(--bg-raised); color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.buyer-meta-chip--suburbs { color: var(--gold); }
+.buyer-status-badge { font-size: 11px; font-family: var(--font-mono); text-transform: uppercase; white-space: nowrap; }
+
+.buyer-timeframe, .buyer-features, .buyer-notes {
+  font-size: 12px; color: var(--text-muted); margin-bottom: 4px;
+}
+
+.buyer-card-footer {
+  display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap;
+}
+.buyer-match-badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 4px;
+  background: rgba(201,168,76,.1); color: var(--gold);
+  font-family: var(--font-mono);
+}
+.buyer-last-contact { font-size: 11px; color: var(--text-muted); }
+.buyer-card-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+
+.buyer-outcome-row {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+}
+.outcome-btn {
+  padding: 4px 10px; font-size: 11px; border-radius: 5px;
+  border: 1px solid var(--border); background: var(--bg-raised);
+  color: var(--text-muted); cursor: pointer; font-family: var(--font-mono);
+  transition: all .15s;
+}
+.outcome-btn:hover { border-color: var(--gold); color: var(--text-primary); }
+.outcome-btn--connected { border-color: var(--green); color: var(--green); }
+.outcome-btn--connected:hover { background: rgba(34,197,94,.1); }
+.outcome-btn--not_interested { border-color: var(--outcome-notint); color: var(--outcome-notint); }
+
+.match-card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px 14px; margin-bottom: 8px;
+}
+.match-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.match-card-buyer { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.match-card-addr { font-size: 13px; color: var(--gold); font-family: var(--font-mono); }
+.match-card-meta { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.match-notified-tag, .match-reminder-tag {
+  font-size: 10px; padding: 2px 7px; border-radius: 4px; font-family: var(--font-mono);
+}
+.match-notified-tag { background: rgba(59,130,246,.1); color: #3b82f6; }
+.match-reminder-tag { background: rgba(201,168,76,.1); color: var(--gold); }
+
+.modal-box--wide { max-width: 560px; width: 95vw; }
+.modal-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.modal-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+@media (max-width: 768px) {
+  .modal-grid-2, .modal-grid-3 { grid-template-columns: 1fr; }
+  .buyers-toolbar { gap: 8px; }
 }

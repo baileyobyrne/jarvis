@@ -1825,268 +1825,408 @@ function MarketPage({ token }) {
   );
 }
 
-// ── Buyers Page ────────────────────────────────────────────────────────────
-function BuyersPage({ token }) {
-  const [data, setData] = useState({ active: {}, archived: {} });
-  const [loading, setLoading] = useState(true);
-  const [sort, setSort] = useState('newest');
-  const [group, setGroup] = useState('listing');
-  const [expandedListings, setExpandedListings] = useState({});
-  const [showArchived, setShowArchived] = useState(false);
-  const [outcomeTarget, setOutcomeTarget] = useState(null);
-  const [syncing, setSyncing] = useState(false);
-  const [syncMsg, setSyncMsg] = useState('');
-  const syncPollRef = useRef(null);
+// ── Buyers CRM ─────────────────────────────────────────────────────────────
+function BuyerModal({ token, buyer, onSaved, onClose }) {
+  const isEdit = !!buyer;
+  const [name, setName] = React.useState(buyer?.name || '');
+  const [mobile, setMobile] = React.useState(buyer?.mobile || '');
+  const [email, setEmail] = React.useState(buyer?.email || '');
+  const [priceMin, setPriceMin] = React.useState(buyer?.price_min ? String(buyer.price_min) : '');
+  const [priceMax, setPriceMax] = React.useState(buyer?.price_max ? String(buyer.price_max) : '');
+  const [bedsMin, setBedsMin] = React.useState(buyer?.beds_min ? String(buyer.beds_min) : '');
+  const [bedsMax, setBedsMax] = React.useState(buyer?.beds_max ? String(buyer.beds_max) : '');
+  const [propertyType, setPropertyType] = React.useState(buyer?.property_type || 'any');
+  const [suburbsInput, setSuburbsInput] = React.useState(
+    Array.isArray(buyer?.suburbs_wanted) ? buyer.suburbs_wanted.join(', ') : ''
+  );
+  const [timeframe, setTimeframe] = React.useState(buyer?.timeframe || '');
+  const [features, setFeatures] = React.useState(buyer?.features || '');
+  const [notes, setNotes] = React.useState(buyer?.notes || '');
+  const [status, setStatus] = React.useState(buyer?.status || 'active');
+  const [source, setSource] = React.useState(buyer?.source || '');
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState('');
 
-  const loadBuyers = useCallback(async () => {
-    const res = await apiFetch(`/api/buyers/calllist?sort=${sort}&group=${group}`, token);
-    if (res.ok) setData(await res.json());
-  }, [token, sort, group]);
-
-  useEffect(() => {
-    setLoading(true);
-    loadBuyers().finally(() => setLoading(false));
-  }, [sort, group, token]);
-
-  // Poll sync status while running
-  useEffect(() => {
-    if (!syncing) return;
-    syncPollRef.current = setInterval(async () => {
-      const res = await apiFetch('/api/buyers/sync/status', token);
-      if (!res.ok) return;
-      const s = await res.json();
-      if (!s.running) {
-        clearInterval(syncPollRef.current);
-        setSyncing(false);
-        const last = s.log[s.log.length - 1] || '';
-        setSyncMsg(s.exitCode === 0 ? '✅ Sync complete' : `⚠️ Sync ended: ${last}`);
-        await loadBuyers();
-        setTimeout(() => setSyncMsg(''), 5000);
+  const handleSave = async () => {
+    if (!name.trim()) { setError('Name is required'); return; }
+    setSaving(true);
+    setError('');
+    const suburbs_wanted = suburbsInput.split(',').map(s => s.trim()).filter(Boolean);
+    const body = {
+      name: name.trim(),
+      mobile: mobile.trim() || null,
+      email: email.trim() || null,
+      price_min: priceMin ? parseInt(priceMin.replace(/[^0-9]/g,'')) : null,
+      price_max: priceMax ? parseInt(priceMax.replace(/[^0-9]/g,'')) : null,
+      beds_min: bedsMin ? parseInt(bedsMin) : null,
+      beds_max: bedsMax ? parseInt(bedsMax) : null,
+      property_type: propertyType,
+      suburbs_wanted,
+      timeframe: timeframe || null,
+      features: features.trim() || null,
+      notes: notes.trim() || null,
+      status,
+      source: source || null,
+    };
+    const path = isEdit ? `/api/buyer-profiles/${buyer.id}` : '/api/buyer-profiles';
+    const method = isEdit ? 'PATCH' : 'POST';
+    try {
+      const res = await apiFetch(path, token, { method, body: JSON.stringify(body) });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Save failed' }));
+        setError(err.error || 'Save failed');
+        setSaving(false);
+        return;
       }
-    }, 3000);
-    return () => clearInterval(syncPollRef.current);
-  }, [syncing, token, loadBuyers]);
-
-  const handleSync = async () => {
-    setSyncing(true);
-    setSyncMsg('Syncing with AgentBox…');
-    await apiFetch('/api/buyers/sync', token, { method: 'POST' });
+      const data = await res.json();
+      onSaved(isEdit ? data.buyer : data.buyer);
+    } catch (e) {
+      setError('Network error');
+      setSaving(false);
+    }
   };
-
-  const toggleExpand = (addr) => setExpandedListings(prev => ({ ...prev, [addr]: !prev[addr] }));
-
-  const logBuyerOutcome = async (buyerId, outcome) => {
-    try {
-      await apiFetch(`/api/buyers/${buyerId}/outcome`, token, {
-        method: 'PATCH',
-        body: JSON.stringify({ outcome, notes: '' })
-      });
-      setOutcomeTarget(null);
-      await loadBuyers();
-    } catch (err) { console.error(err); }
-  };
-
-  const markDone = async (buyerId, address) => {
-    try {
-      await apiFetch(`/api/buyers/${buyerId}/done`, token, { method: 'PATCH' });
-      await loadBuyers();
-    } catch (err) { console.error(err); }
-  };
-
-  if (loading) return <div className="loading-state"><div className="spinner" /></div>;
-
-  const activeEntries = Object.entries(data.active || {});
 
   return (
-    <div className="page-body">
-      <div className="buyers-toolbar">
-        <div className="buyers-control-group">
-          <span className="buyers-control-label">SORT</span>
-          <div className="buyers-toggle">
-            <button className={`buyers-toggle-btn ${sort === 'newest' ? 'active' : ''}`} onClick={() => setSort('newest')}>Newest</button>
-            <button className={`buyers-toggle-btn ${sort === 'oldest' ? 'active' : ''}`} onClick={() => setSort('oldest')}>Oldest</button>
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box modal-box--wide" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <span>{isEdit ? 'Edit Buyer' : 'Add New Buyer'}</span>
+          <button className="modal-close" onClick={onClose}><X size={16} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="modal-grid-2">
+            <div className="modal-field">
+              <label>Name *</label>
+              <input className="modal-input" value={name} onChange={e => setName(e.target.value)} placeholder="Tom & Sarah Chen" />
+            </div>
+            <div className="modal-field">
+              <label>Mobile</label>
+              <input className="modal-input" value={mobile} onChange={e => setMobile(e.target.value)} placeholder="0400 000 000" />
+            </div>
+          </div>
+          <div className="modal-grid-2">
+            <div className="modal-field">
+              <label>Price Min ($)</label>
+              <input className="modal-input" value={priceMin} onChange={e => setPriceMin(e.target.value)} placeholder="1800000" />
+            </div>
+            <div className="modal-field">
+              <label>Price Max ($)</label>
+              <input className="modal-input" value={priceMax} onChange={e => setPriceMax(e.target.value)} placeholder="2100000" />
+            </div>
+          </div>
+          <div className="modal-grid-3">
+            <div className="modal-field">
+              <label>Beds Min</label>
+              <select className="modal-input" value={bedsMin} onChange={e => setBedsMin(e.target.value)}>
+                <option value="">Any</option>
+                {[1,2,3,4,5,6].map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+            <div className="modal-field">
+              <label>Beds Max</label>
+              <select className="modal-input" value={bedsMax} onChange={e => setBedsMax(e.target.value)}>
+                <option value="">Any</option>
+                {[1,2,3,4,5,6].map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+            <div className="modal-field">
+              <label>Property Type</label>
+              <select className="modal-input" value={propertyType} onChange={e => setPropertyType(e.target.value)}>
+                <option value="any">Any</option>
+                <option value="house">House</option>
+                <option value="unit">Unit</option>
+                <option value="townhouse">Townhouse</option>
+              </select>
+            </div>
+          </div>
+          <div className="modal-field">
+            <label>Suburbs (comma-separated)</label>
+            <input className="modal-input" value={suburbsInput} onChange={e => setSuburbsInput(e.target.value)}
+              placeholder="Willoughby, North Willoughby, Naremburn" />
+          </div>
+          <div className="modal-grid-2">
+            <div className="modal-field">
+              <label>Timeframe</label>
+              <select className="modal-input" value={timeframe} onChange={e => setTimeframe(e.target.value)}>
+                <option value="">Not set</option>
+                <option value="3months">3 months</option>
+                <option value="6months">6 months</option>
+                <option value="12months">12 months</option>
+                <option value="flexible">Flexible</option>
+              </select>
+            </div>
+            <div className="modal-field">
+              <label>Status</label>
+              <select className="modal-input" value={status} onChange={e => setStatus(e.target.value)}>
+                <option value="active">Active</option>
+                <option value="paused">Paused</option>
+                <option value="purchased">Purchased</option>
+                <option value="archived">Archived</option>
+              </select>
+            </div>
+          </div>
+          <div className="modal-field">
+            <label>Must-Have Features</label>
+            <input className="modal-input" value={features} onChange={e => setFeatures(e.target.value)}
+              placeholder="Garage, quiet street, pool, land size..." />
+          </div>
+          <div className="modal-field">
+            <label>Notes</label>
+            <textarea className="modal-input" rows={2} value={notes} onChange={e => setNotes(e.target.value)}
+              placeholder="Any additional notes about this buyer..." />
+          </div>
+          {error && <div className="modal-error">{error}</div>}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn modal-btn--secondary" onClick={onClose}>Cancel</button>
+          <button className="modal-btn modal-btn--primary" onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving...' : (isEdit ? 'Save Changes' : 'Add Buyer')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BuyerCard({ buyer, token, onEdited, onDelete }) {
+  const [showOutcome, setShowOutcome] = React.useState(false);
+  const [showEdit, setShowEdit] = React.useState(false);
+  const [logging, setLogging] = React.useState(false);
+  const [lastOutcome, setLastOutcome] = React.useState(buyer.last_outcome);
+  const [deleteConfirm, setDeleteConfirm] = React.useState(false);
+
+  const suburbsWanted = Array.isArray(buyer.suburbs_wanted) ? buyer.suburbs_wanted : [];
+  const budgetStr = (buyer.price_min || buyer.price_max)
+    ? `$${buyer.price_min ? (buyer.price_min/1e6).toFixed(1) + 'M' : '?'} – $${buyer.price_max ? (buyer.price_max/1e6).toFixed(1) + 'M' : '?'}`
+    : null;
+  const bedsStr = buyer.beds_min ? `${buyer.beds_min}${buyer.beds_max ? '–' + buyer.beds_max : '+'}BR` : null;
+
+  const statusColors = { active: 'var(--green)', paused: 'var(--gold)', purchased: '#3b82f6', archived: 'var(--muted)' };
+
+  const logOutcome = async (outcome) => {
+    setLogging(true);
+    const res = await apiFetch(`/api/buyer-profiles/${buyer.id}/log-call`, token, {
+      method: 'POST', body: JSON.stringify({ outcome })
+    });
+    if (res.ok) {
+      setLastOutcome(outcome);
+      setShowOutcome(false);
+    }
+    setLogging(false);
+  };
+
+  return (
+    <div className="buyer-card">
+      <div className="buyer-card-header">
+        <div className="buyer-card-info">
+          <div className="buyer-card-name">{buyer.name}</div>
+          <div className="buyer-card-meta">
+            {budgetStr && <span className="buyer-meta-chip">{budgetStr}</span>}
+            {bedsStr && <span className="buyer-meta-chip">{bedsStr}</span>}
+            {buyer.property_type && buyer.property_type !== 'any' && (
+              <span className="buyer-meta-chip">{buyer.property_type}</span>
+            )}
+            {suburbsWanted.length > 0 && (
+              <span className="buyer-meta-chip buyer-meta-chip--suburbs">{suburbsWanted.join(', ')}</span>
+            )}
           </div>
         </div>
-        <div className="buyers-control-group">
-          <span className="buyers-control-label">GROUP BY</span>
-          <div className="buyers-toggle">
-            <button className={`buyers-toggle-btn ${group === 'listing' ? 'active' : ''}`} onClick={() => setGroup('listing')}>Listing</button>
-            <button className={`buyers-toggle-btn ${group === 'type' ? 'active' : ''}`} onClick={() => setGroup('type')}>Type</button>
-          </div>
-        </div>
-        <button className="topup-btn" onClick={handleSync} disabled={syncing} style={{ marginLeft: 'auto' }}>
-          {syncing ? 'Syncing…' : '↻ Sync from AgentBox'}
-        </button>
-        {syncMsg && <span className="sync-msg">{syncMsg}</span>}
+        <span className="buyer-status-badge" style={{ color: statusColors[buyer.status] || 'var(--muted)' }}>
+          {buyer.status}
+        </span>
       </div>
 
-      {group === 'listing' ? (
-        activeEntries.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-state-icon"><Users size={32} /></div>
-            <div className="empty-state-title">No active buyer enquiries</div>
-            <div className="empty-state-sub">Press "Sync from AgentBox" to pull the latest enquiries</div>
-          </div>
-        ) : (
-          activeEntries.map(([addr, groupData]) => {
-            const buyers = groupData.buyers || [];
-            const listing = groupData.listing || {};
-            return (
-              <div className="listing-group" key={addr}>
-                <div className="listing-group-header" onClick={() => toggleExpand(addr)}>
-                  <MapPin size={13} style={{ color: 'var(--gold)', flexShrink: 0 }} />
-                  <span className="listing-group-addr">{addr}</span>
-                  <span className="listing-group-count">{buyers.length} buyer{buyers.length !== 1 ? 's' : ''}</span>
-                  <div className="listing-group-meta">
-                    {listing.beds && <span className="listing-meta-chip"><Bed size={10}/> {listing.beds}</span>}
-                    {listing.baths && <span className="listing-meta-chip"><Bath size={10}/> {listing.baths}</span>}
-                    {listing.cars && <span className="listing-meta-chip"><Car size={10}/> {listing.cars}</span>}
-                    {listing.price_guide && <span className="listing-price-chip">{listing.price_guide}</span>}
-                  </div>
-                  {expandedListings[addr] ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-                </div>
-                {expandedListings[addr] && (
-                  <div className="listing-detail-panel">
-                    {listing.headline && <div className="listing-detail-headline">{listing.headline}</div>}
-                    <div className="listing-detail-stats">
-                      {listing.land_area && <div className="listing-stat"><span className="listing-stat-label">LAND</span><span>{listing.land_area}</span></div>}
-                      {listing.building_area && <div className="listing-stat"><span className="listing-stat-label">BUILDING</span><span>{listing.building_area}</span></div>}
-                      {listing.method && <div className="listing-stat"><span className="listing-stat-label">METHOD</span><span>{listing.method}</span></div>}
-                      {listing.auction_date && <div className="listing-stat"><span className="listing-stat-label">AUCTION</span><span>{new Date(listing.auction_date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>}
-                      {listing.council_rates && <div className="listing-stat"><span className="listing-stat-label">COUNCIL</span><span>${listing.council_rates}</span></div>}
-                      {listing.water_rates && <div className="listing-stat"><span className="listing-stat-label">WATER</span><span>${listing.water_rates}</span></div>}
-                      {listing.strata_total && listing.strata_total !== '0 / quarter' && <div className="listing-stat"><span className="listing-stat-label">STRATA</span><span>${listing.strata_total}</span></div>}
-                    </div>
-                    {listing.description && (
-                      <div className="listing-detail-desc">{listing.description}</div>
-                    )}
-                    {listing.web_link && (
-                      <a className="listing-detail-link" href={listing.web_link} target="_blank" rel="noopener noreferrer">View on McGrath →</a>
-                    )}
-                  </div>
-                )}
-                {buyers.map(buyer => (
-                  <div className="buyer-row" key={buyer.id}>
-                    <div className="buyer-row-main">
-                      <div className="buyer-name">{buyer.buyer_name || 'Unknown'}</div>
-                      <div className="buyer-row-meta">
-                        {buyer.enquiry_date && (
-                          <span className="buyer-date">
-                            <Calendar size={9} style={{ marginRight: 3, verticalAlign: 'middle' }} />
-                            {new Date(buyer.enquiry_date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}
-                          </span>
-                        )}
-                        {buyer.enquiry_type && (
-                          <span className={`buyer-type-badge buyer-type-${buyer.enquiry_type}`}>{buyer.enquiry_type.replace(/_/g, ' ')}</span>
-                        )}
-                      </div>
-                    </div>
-                    {(buyer.buyer_mobile || buyer.mobile) && (
-                      <a className="buyer-mobile" href={`tel:${buyer.buyer_mobile || buyer.mobile}`}>
-                        <Phone size={11} style={{ marginRight: 3, verticalAlign: 'middle' }} />
-                        {buyer.buyer_mobile || buyer.mobile}
-                      </a>
-                    )}
-                    {outcomeTarget === buyer.id ? (
-                      <div className="buyer-actions">
-                        {['interested', 'not_interested', 'no_answer', 'left_message', 'appointment_booked'].map(o => (
-                          <button key={o} className="icon-btn" style={{ fontSize: 9, padding: '2px 6px' }} onClick={() => logBuyerOutcome(buyer.id, o)}>
-                            {o.replace(/_/g, ' ')}
-                          </button>
-                        ))}
-                        <button className="icon-btn danger" onClick={() => setOutcomeTarget(null)}><X size={12} /></button>
-                      </div>
-                    ) : (
-                      <div className="buyer-actions">
-                        <button className="icon-btn" title="Log outcome" onClick={() => setOutcomeTarget(buyer.id)}><PhoneCall size={13} /></button>
-                        <button className="icon-btn danger" title="Mark done" onClick={() => markDone(buyer.id, addr)}><Check size={13} /></button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            );
-          })
-        )
-      ) : (
-        /* group === 'type' view */
-        ['inspection', 'online_enquiry', 'callback', 'other'].map(type => {
-          const buyers = data.active[type] || [];
-          if (!buyers.length) return null;
-          return (
-            <div className="type-group" key={type}>
-              <div className="type-group-header">
-                <span className={`type-group-badge buyer-type-badge buyer-type-${type}`}>{type.replace(/_/g, ' ')}</span>
-                <span className="listing-group-count">{buyers.length} buyer{buyers.length !== 1 ? 's' : ''}</span>
-              </div>
-              {buyers.map(buyer => (
-                <div className="buyer-row" key={buyer.id}>
-                  <div className="buyer-row-main">
-                    <div className="buyer-name">{buyer.buyer_name || 'Unknown'}</div>
-                    <div className="buyer-row-meta">
-                      <span className="buyer-listing-ref">{buyer.listing_address}</span>
-                      {buyer.enquiry_date && <span className="buyer-date"><Calendar size={9}/> {new Date(buyer.enquiry_date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })}</span>}
-                    </div>
-                  </div>
-                  {(buyer.buyer_mobile || buyer.mobile) && (
-                    <a className="buyer-mobile" href={`tel:${buyer.buyer_mobile || buyer.mobile}`}><Phone size={11}/> {buyer.buyer_mobile || buyer.mobile}</a>
-                  )}
-                  <div className="buyer-actions">
-                    <button className="icon-btn" title="Log outcome" onClick={() => setOutcomeTarget(buyer.id)}><PhoneCall size={13} /></button>
-                    <button className="icon-btn danger" title="Mark done" onClick={() => markDone(buyer.id, buyer.listing_address || '')}><Check size={13} /></button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          );
-        })
+      {buyer.timeframe && (
+        <div className="buyer-timeframe">Timeframe: {buyer.timeframe}</div>
+      )}
+      {buyer.features && (
+        <div className="buyer-features">{buyer.features}</div>
+      )}
+      {buyer.notes && (
+        <div className="buyer-notes">{buyer.notes}</div>
       )}
 
-      {Object.keys(data.archived || {}).length > 0 && (
-        <div className="archived-section">
-          <button className="archived-toggle" onClick={() => setShowArchived(v => !v)}>
-            {showArchived ? <ChevronUp size={13}/> : <ChevronDown size={13}/>}
-            <span>Archived Listings</span>
-            <span className="listing-group-count">{Object.values(data.archived).reduce((n, g) => n + (g.buyers || g).length, 0)} buyer{Object.values(data.archived).reduce((n, g) => n + (g.buyers || g).length, 0) !== 1 ? 's' : ''} across {Object.keys(data.archived).length} listing{Object.keys(data.archived).length !== 1 ? 's' : ''}</span>
+      <div className="buyer-card-footer">
+        {lastOutcome && (
+          <span className={`outcome-chip chip-${lastOutcome}`}>
+            {OUTCOME_LABELS[lastOutcome] || lastOutcome}
+          </span>
+        )}
+        {buyer.recent_match_count > 0 && (
+          <span className="buyer-match-badge">{buyer.recent_match_count} match{buyer.recent_match_count > 1 ? 'es' : ''}</span>
+        )}
+        {buyer.last_contacted_at && (
+          <span className="buyer-last-contact">Last: {timeAgo(buyer.last_contacted_at)}</span>
+        )}
+        <div className="buyer-card-actions">
+          {buyer.mobile && (
+            <a className="icon-btn" href={`tel:${buyer.mobile}`} title="Call"><Phone size={13} /></a>
+          )}
+          <button className="icon-btn" onClick={() => setShowOutcome(o => !o)} disabled={logging} title="Log call">
+            <PhoneCall size={13} />
           </button>
-          {showArchived && (
-            <div className="archived-content">
-              {Object.entries(data.archived).map(([addr, groupData]) => {
-                const buyers = group === 'listing' ? groupData.buyers || [] : [];
-                const listing = group === 'listing' ? groupData.listing || {} : {};
-                return (
-                  <div className="listing-group archived-listing" key={addr}>
-                    <div className="listing-group-header" onClick={() => toggleExpand('archived_' + addr)}>
-                      <MapPin size={13} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
-                      <span className="listing-group-addr" style={{ color: 'var(--text-muted)' }}>{addr}</span>
-                      <span className="listing-group-count">{buyers.length} buyer{buyers.length !== 1 ? 's' : ''}</span>
-                      <span className="archived-status-badge">WITHDRAWN</span>
-                    </div>
-                    {expandedListings['archived_' + addr] && listing.headline && (
-                      <div className="listing-detail-panel" style={{ opacity: 0.7 }}>
-                        <div className="listing-detail-headline">{listing.headline}</div>
-                      </div>
-                    )}
-                    {buyers.map(buyer => (
-                      <div className="buyer-row" key={buyer.id} style={{ opacity: 0.6 }}>
-                        <div className="buyer-row-main">
-                          <div className="buyer-name">{buyer.buyer_name || 'Unknown'}</div>
-                          <div className="buyer-row-meta">
-                            {buyer.enquiry_date && <span className="buyer-date"><Calendar size={9}/> {new Date(buyer.enquiry_date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
-                            {buyer.enquiry_type && <span className={`buyer-type-badge buyer-type-${buyer.enquiry_type}`}>{buyer.enquiry_type.replace(/_/g, ' ')}</span>}
-                          </div>
-                        </div>
-                        {(buyer.buyer_mobile || buyer.mobile) && (
-                          <a className="buyer-mobile" href={`tel:${buyer.buyer_mobile || buyer.mobile}`}><Phone size={11}/> {buyer.buyer_mobile || buyer.mobile}</a>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                );
-              })}
-            </div>
+          <button className="icon-btn" onClick={() => setShowEdit(true)} title="Edit"><Pencil size={13} /></button>
+          {deleteConfirm ? (
+            <>
+              <button className="icon-btn icon-btn--danger" onClick={() => { onDelete(); setDeleteConfirm(false); }}>Yes</button>
+              <button className="icon-btn" onClick={() => setDeleteConfirm(false)}>No</button>
+            </>
+          ) : (
+            <button className="icon-btn icon-btn--danger" onClick={() => setDeleteConfirm(true)} title="Archive buyer">
+              <Trash2 size={13} />
+            </button>
           )}
         </div>
+      </div>
+
+      {showOutcome && (
+        <div className="buyer-outcome-row">
+          {['connected','left_message','no_answer','not_interested','callback_requested'].map(o => (
+            <button key={o} className={`outcome-btn outcome-btn--${o}`} onClick={() => logOutcome(o)} disabled={logging}>
+              {OUTCOME_LABELS[o] || o}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {showEdit && (
+        <BuyerModal
+          token={token}
+          buyer={buyer}
+          onSaved={(updated) => { onEdited(updated); setShowEdit(false); }}
+          onClose={() => setShowEdit(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function BuyersPage({ token }) {
+  const [view, setView] = React.useState('directory');
+  const [buyers, setBuyers] = React.useState([]);
+  const [matches, setMatches] = React.useState([]);
+  const [statusFilter, setStatusFilter] = React.useState('active');
+  const [loading, setLoading] = React.useState(true);
+  const [showAddModal, setShowAddModal] = React.useState(false);
+  const [editTarget, setEditTarget] = React.useState(null);
+
+  const loadBuyers = React.useCallback(() => {
+    setLoading(true);
+    apiFetch(`/api/buyer-profiles?status=${statusFilter}`, token)
+      .then(r => r.ok ? r.json() : [])
+      .then(data => { setBuyers(Array.isArray(data) ? data : []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [token, statusFilter]);
+
+  const loadMatches = React.useCallback(() => {
+    apiFetch('/api/buyer-profiles/matches/recent', token)
+      .then(r => r.ok ? r.json() : [])
+      .then(data => setMatches(Array.isArray(data) ? data : []))
+      .catch(() => {});
+  }, [token]);
+
+  React.useEffect(() => {
+    if (view === 'directory') loadBuyers();
+    else loadMatches();
+  }, [view, loadBuyers, loadMatches]);
+
+  const handleDelete = React.useCallback(async (id) => {
+    const res = await apiFetch(`/api/buyer-profiles/${id}`, token, { method: 'DELETE' });
+    if (res.ok) setBuyers(prev => prev.filter(b => b.id !== id));
+  }, [token]);
+
+  return (
+    <div className="buyers-crm-page">
+      {/* Toolbar */}
+      <div className="buyers-toolbar">
+        <div className="buyers-view-toggle">
+          <button className={`view-tab${view === 'directory' ? ' view-tab--active' : ''}`} onClick={() => setView('directory')}>
+            Buyer Directory
+            {buyers.length > 0 && <span className="view-tab-count">{buyers.length}</span>}
+          </button>
+          <button className={`view-tab${view === 'matches' ? ' view-tab--active' : ''}`} onClick={() => setView('matches')}>
+            Recent Matches
+            {matches.length > 0 && <span className="view-tab-count match-count">{matches.length}</span>}
+          </button>
+        </div>
+        {view === 'directory' && (
+          <>
+            <div className="buyers-status-filter">
+              {['active','paused','purchased','all'].map(s => (
+                <button key={s} className={`status-filter-btn${statusFilter === s ? ' active' : ''}`}
+                  onClick={() => setStatusFilter(s)}>
+                  {s}
+                </button>
+              ))}
+            </div>
+            <button className="buyers-add-btn" onClick={() => { setEditTarget(null); setShowAddModal(true); }}>
+              <Plus size={13} /> Add Buyer
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* Directory view */}
+      {view === 'directory' && (
+        <div className="buyers-directory">
+          {loading && <div className="loading-state">Loading buyers...</div>}
+          {!loading && buyers.length === 0 && (
+            <div className="empty-state">
+              No {statusFilter !== 'all' ? statusFilter : ''} buyers yet.{' '}
+              <button className="link-btn" onClick={() => setShowAddModal(true)}>Add the first one.</button>
+            </div>
+          )}
+          {buyers.map(buyer => (
+            <BuyerCard
+              key={buyer.id}
+              buyer={buyer}
+              token={token}
+              onEdited={(updated) => setBuyers(prev => prev.map(b => b.id === updated.id ? updated : b))}
+              onDelete={() => handleDelete(buyer.id)}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Matches view */}
+      {view === 'matches' && (
+        <div className="buyers-matches">
+          {matches.length === 0 && (
+            <div className="empty-state">No recent buyer matches (last 30 days).</div>
+          )}
+          {matches.map(m => (
+            <div key={m.id} className="match-card">
+              <div className="match-card-header">
+                <span className="match-card-buyer">{m.buyer_name}</span>
+                {m.buyer_mobile && (
+                  <a href={`tel:${m.buyer_mobile}`} className="icon-btn match-phone-btn">
+                    <Phone size={12} />
+                  </a>
+                )}
+              </div>
+              <div className="match-card-addr">{m.event_address}</div>
+              <div className="match-card-meta">
+                <span>{timeAgo(m.matched_at)}</span>
+                {m.notified_telegram === 1 && <span className="match-notified-tag">Telegram sent</span>}
+                {m.reminder_created === 1 && <span className="match-reminder-tag">Reminder created</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add/Edit modal */}
+      {(showAddModal || editTarget) && (
+        <BuyerModal
+          token={token}
+          buyer={editTarget}
+          onSaved={(saved) => {
+            setShowAddModal(false);
+            setEditTarget(null);
+            loadBuyers();
+          }}
+          onClose={() => { setShowAddModal(false); setEditTarget(null); }}
+        />
       )}
     </div>
   );
@@ -3221,7 +3361,7 @@ function App() {
   const pageTitles = {
     calls: { title: 'Today\'s Calls', subtitle: 'DAILY INTELLIGENCE BRIEF' },
     market: { title: 'Market Events', subtitle: 'RECENT ACTIVITY — 14 DAYS' },
-    buyers: { title: 'Buyer Enquiries', subtitle: 'ACTIVE CALL LIST' },
+    buyers: { title: 'Buyer Profiles', subtitle: 'BUYER CRM — ACTIVE ENQUIRIES & MATCHES' },
     reminders: { title: 'Reminders', subtitle: 'UPCOMING FOLLOW-UPS' },
     contacts: { title: 'Contacts', subtitle: 'CRM + PRICEFINDER — CONTACTS & PROPERTIES' },
     history: { title: 'Call History', subtitle: 'TODAY\'S LOGGED OUTCOMES' }
