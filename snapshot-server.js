@@ -1690,7 +1690,8 @@ app.patch('/api/market-events/:id', requireAuth, async (req, res) => {
     const existing = db.prepare('SELECT * FROM market_events WHERE id = ?').get(id);
     if (!existing) return res.status(404).json({ error: 'not found' });
 
-    const { address, type, beds, baths, cars, property_type, price, suburb } = req.body;
+    const { address, type, beds, baths, cars, property_type, price, suburb,
+            confirmed_price, sold_date, status } = req.body;
     const normAddress = address
       ? address.toUpperCase().replace(/\s+/g, ' ').trim()
       : existing.address;
@@ -1735,21 +1736,35 @@ app.patch('/api/market-events/:id', requireAuth, async (req, res) => {
       topContacts = existing.top_contacts ? JSON.parse(existing.top_contacts) : [];
     }
 
+    const newStatus = status !== undefined ? status : existing.status;
     db.prepare(`
       UPDATE market_events SET
         address = ?, suburb = ?, type = ?, price = ?, proping_estimate = ?,
-        beds = ?, baths = ?, cars = ?, property_type = ?, top_contacts = ?
+        beds = ?, baths = ?, cars = ?, property_type = ?, top_contacts = ?,
+        confirmed_price = ?, sold_date = ?, status = ?
       WHERE id = ?
-    `).run(normAddress, newSuburb, newType, price !== undefined ? (price || null) : existing.price,
-           pfEstimate,
-           beds !== undefined ? (beds || null) : existing.beds,
-           baths !== undefined ? (baths || null) : existing.baths,
-           cars !== undefined ? (cars || null) : existing.cars,
-           property_type !== undefined ? (property_type || null) : existing.property_type,
-           JSON.stringify(topContacts), id);
+    `).run(
+      normAddress, newSuburb, newType,
+      price !== undefined ? (price || null) : existing.price,
+      pfEstimate,
+      beds !== undefined ? (beds || null) : existing.beds,
+      baths !== undefined ? (baths || null) : existing.baths,
+      cars !== undefined ? (cars || null) : existing.cars,
+      property_type !== undefined ? (property_type || null) : existing.property_type,
+      JSON.stringify(topContacts),
+      confirmed_price !== undefined ? (confirmed_price || null) : existing.confirmed_price,
+      sold_date !== undefined ? (sold_date || null) : existing.sold_date,
+      newStatus,
+      id
+    );
 
     if (newType === 'sold' && existing.type !== 'sold') {
       notifyWatchersOnSold(normalizeAddrForDedup(normAddress)).catch(console.error);
+    }
+
+    // Auto-link: when a listing transitions to sold status, record the link
+    if (newStatus === 'sold' && existing.status !== 'sold' && existing.type === 'listing') {
+      db.prepare(`UPDATE market_events SET linked_event_id = ? WHERE id = ?`).run(existing.id, id);
     }
 
     // Update listing-alerts.json too
