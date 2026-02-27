@@ -31,6 +31,7 @@ async function main() {
     SELECT * FROM reminders
     WHERE fire_at <= datetime('now', 'localtime')
       AND sent = 0
+      AND completed_at IS NULL
   `).all();
 
   if (due.length === 0) {

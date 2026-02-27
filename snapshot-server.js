@@ -1040,6 +1040,10 @@ app.patch('/api/reminders/:id', requireAuth, (req, res) => {
   try {
     const id = parseInt(req.params.id);
     if (!id) return res.status(400).json({ error: 'invalid id' });
+    // Pre-fetch to get existence + guard state
+    const existing = db.prepare('SELECT id, sent, completed_at FROM reminders WHERE id = ?').get(id);
+    if (!existing) return res.status(404).json({ error: 'not found' });
+    if (existing.completed_at) return res.status(409).json({ error: 'cannot edit a completed reminder' });
     const ALLOWED = ['note', 'fire_at', 'contact_name', 'contact_mobile'];
     const sets = [], vals = [];
     for (const key of ALLOWED) {
@@ -1052,7 +1056,6 @@ app.patch('/api/reminders/:id', requireAuth, (req, res) => {
     vals.push(id);
     db.prepare(`UPDATE reminders SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
     const reminder = db.prepare('SELECT * FROM reminders WHERE id = ?').get(id);
-    if (!reminder) return res.status(404).json({ error: 'not found' });
     res.json({ ok: true, reminder });
   } catch (e) {
     console.error('[PATCH /api/reminders/:id]', e.message);
@@ -1065,8 +1068,12 @@ app.delete('/api/reminders/:id', requireAuth, (req, res) => {
   try {
     const id = parseInt(req.params.id);
     if (!id) return res.status(400).json({ error: 'invalid id' });
-    const result = db.prepare('DELETE FROM reminders WHERE id = ?').run(id);
-    if (result.changes === 0) return res.status(404).json({ error: 'not found' });
+    const existing = db.prepare('SELECT calendar_event_uid FROM reminders WHERE id = ?').get(id);
+    if (!existing) return res.status(404).json({ error: 'not found' });
+    if (existing.calendar_event_uid) {
+      console.warn(`[reminders] DELETE id=${id} — orphaned iCal event: ${existing.calendar_event_uid}`);
+    }
+    db.prepare('DELETE FROM reminders WHERE id = ?').run(id);
     res.json({ ok: true });
   } catch (e) {
     console.error('[DELETE /api/reminders/:id]', e.message);
