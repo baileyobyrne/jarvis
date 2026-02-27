@@ -994,7 +994,12 @@ app.post('/api/reminders', requireAuth, async (req, res) => {
 app.get('/api/reminders/upcoming', requireAuth, (req, res) => {
   try {
     const rows = db.prepare(`
-      SELECT * FROM reminders WHERE sent = 0 ORDER BY fire_at ASC LIMIT 50
+      SELECT * FROM reminders
+      WHERE sent = 0 AND completed_at IS NULL
+      ORDER BY
+        CASE WHEN fire_at IS NULL THEN 1 ELSE 0 END,
+        fire_at ASC
+      LIMIT 100
     `).all();
     res.json(rows);
   } catch (e) {
@@ -1115,6 +1120,20 @@ app.get('/api/history', requireAuth, (req, res) => {
   }
 });
 
+// DELETE /api/history/:id — remove an individual call log entry
+app.delete('/api/history/:id', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const result = db.prepare('DELETE FROM call_log WHERE id = ?').run(id);
+    if (result.changes === 0) return res.status(404).json({ error: 'not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[DELETE /api/history/:id]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/contacts/nearby
 app.get('/api/contacts/nearby', requireAuth, (req, res) => {
   try {
@@ -1174,6 +1193,28 @@ app.post('/api/contacts', requireAuth, (req, res) => {
 
   const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(id);
   res.json({ ok: true, contact });
+});
+
+// DELETE /api/contacts/:id — remove a contact with full cascade cleanup
+app.delete('/api/contacts/:id', requireAuth, (req, res) => {
+  try {
+    const { id } = req.params;
+    const exists = db.prepare('SELECT id FROM contacts WHERE id = ?').get(id);
+    if (!exists) return res.status(404).json({ error: 'not found' });
+    db.transaction(() => {
+      db.prepare('DELETE FROM call_queue WHERE contact_id = ?').run(id);
+      db.prepare('DELETE FROM contact_notes WHERE contact_id = ?').run(id);
+      db.prepare('DELETE FROM reminders WHERE contact_id = ?').run(id);
+      db.prepare('DELETE FROM daily_plans WHERE contact_id = ?').run(id);
+      db.prepare('DELETE FROM listing_watchers WHERE contact_id = ?').run(id);
+      db.prepare('DELETE FROM call_log WHERE contact_id = ?').run(id);
+      db.prepare('DELETE FROM contacts WHERE id = ?').run(id);
+    })();
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[DELETE /api/contacts/:id]', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // PATCH /api/contacts/:id — edit contact fields
