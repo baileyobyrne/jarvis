@@ -2652,7 +2652,7 @@ function HistoryPage({ token }) {
 }
 
 // ── Search Card ────────────────────────────────────────────────────────────
-function SearchCard({ prop, token, onAddedToPlan, onDeleted }) {
+function SearchCard({ prop, token, onAddedToPlan, onDeleted, onEdited }) {
   const [addState, setAddState]         = useState(null); // null | 'adding' | 'added' | 'already'
   const [showOutcome, setShowOutcome]   = useState(false);
   const [logging, setLogging]           = useState(false);
@@ -2942,10 +2942,10 @@ function SearchCard({ prop, token, onAddedToPlan, onDeleted }) {
         </div>
       )}
       {showEdit && contactId && (
-        <EditContactModal
+        <AddEditContactModal
           contact={{ id: contactId, name: prop.crm_name || prop.owner_name || '', mobile: prop.contact_mobile || '', address: prop.address || '', suburb: prop.suburb || '', do_not_call: prop.do_not_call ? 1 : 0 }}
           token={token}
-          onSaved={() => setShowEdit(false)}
+          onSaved={updated => { if (onEdited) onEdited(updated); }}
           onClose={() => setShowEdit(false)}
         />
       )}
@@ -2957,6 +2957,100 @@ function SearchCard({ prop, token, onAddedToPlan, onDeleted }) {
           onClose={() => setShowNotes(false)}
         />
       )}
+    </div>
+  );
+}
+
+// ── AddEditContactModal ──────────────────────────────────────────────────────
+function AddEditContactModal({ token, contact, onClose, onSaved }) {
+  const isEdit = !!contact;
+  const [name,    setName]    = useState(isEdit ? (contact.name || '')    : '');
+  const [mobile,  setMobile]  = useState(isEdit ? (contact.mobile || '')  : '');
+  const [address, setAddress] = useState(isEdit ? (contact.address || '') : '');
+  const [suburb,  setSuburb]  = useState(isEdit ? (contact.suburb || '')  : '');
+  const [dnc,     setDnc]     = useState(isEdit ? !!contact.do_not_call   : false);
+  const [saving,  setSaving]  = useState(false);
+  const [error,   setError]   = useState(null);
+
+  const handleSave = useCallback(async () => {
+    if (!name.trim()) { setError('Name is required'); return; }
+    setSaving(true); setError(null);
+    try {
+      const path   = isEdit ? `/api/contacts/${contact.id}` : '/api/contacts';
+      const method = isEdit ? 'PATCH' : 'POST';
+      const res = await apiFetch(path, token, {
+        method,
+        body: JSON.stringify({
+          name: name.trim(), mobile: mobile.trim(),
+          address: address.trim(), suburb: suburb.trim(),
+          do_not_call: dnc ? 1 : 0
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Save failed');
+      const saved = data.contact || data;
+      onSaved(saved);
+      onClose();
+    } catch (e) { setError(e.message); }
+    finally { setSaving(false); }
+  }, [isEdit, contact, name, mobile, address, suburb, dnc, token, onSaved, onClose]);
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">{isEdit ? 'Edit Contact' : 'Add Contact'}</span>
+          <button className="modal-close" onClick={onClose}><X size={14} /></button>
+        </div>
+        <div className="modal-body">
+          <div className="edit-field">
+            <label className="edit-label">Name *</label>
+            <input className="edit-input" type="text" value={name}
+              placeholder="Full name" onChange={e => setName(e.target.value)} />
+          </div>
+          <div className="edit-field">
+            <label className="edit-label">Mobile</label>
+            <input className="edit-input" type="text" value={mobile}
+              placeholder="04xx xxx xxx" onChange={e => setMobile(e.target.value)} />
+          </div>
+          <div className="edit-field">
+            <label className="edit-label">Address</label>
+            <input className="edit-input" type="text" value={address}
+              placeholder="Street address" onChange={e => setAddress(e.target.value)} />
+          </div>
+          <div className="edit-field">
+            <label className="edit-label">Suburb</label>
+            <select className="edit-input" value={suburb} onChange={e => setSuburb(e.target.value)}>
+              <option value="">Select suburb…</option>
+              <option value="artarmon">Artarmon</option>
+              <option value="castle cove">Castle Cove</option>
+              <option value="castlecrag">Castlecrag</option>
+              <option value="chatswood">Chatswood</option>
+              <option value="crows nest">Crows Nest</option>
+              <option value="lane cove">Lane Cove</option>
+              <option value="middle cove">Middle Cove</option>
+              <option value="naremburn">Naremburn</option>
+              <option value="north willoughby">North Willoughby</option>
+              <option value="northbridge">Northbridge</option>
+              <option value="st leonards">St Leonards</option>
+              <option value="willoughby">Willoughby</option>
+              <option value="willoughby east">Willoughby East</option>
+            </select>
+          </div>
+          <div className="edit-field edit-field--inline">
+            <label className="edit-label">Do Not Call</label>
+            <input type="checkbox" className="edit-checkbox" checked={dnc}
+              onChange={e => setDnc(e.target.checked)} />
+          </div>
+          {error && <div className="edit-error">{error}</div>}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-btn modal-btn--cancel" onClick={onClose}>Cancel</button>
+          <button className="modal-btn modal-btn--save" onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving\u2026' : (isEdit ? 'Save' : 'Add Contact')}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2973,6 +3067,7 @@ function SearchPage({ token }) {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
+  const [showContactModal, setShowContactModal] = useState(false);
 
   const set = useCallback((k, v) => setForm(f => ({ ...f, [k]: v })), []);
 
@@ -3094,8 +3189,25 @@ function SearchPage({ token }) {
             <Search size={13} />
             {loading ? 'Searching…' : 'Search'}
           </button>
+          <button className="search-btn contacts-add-btn" onClick={() => setShowContactModal(true)}>
+            <Plus size={13} /> Add Contact
+          </button>
         </div>
       </div>
+
+      {/* Add Contact Modal */}
+      {showContactModal && (
+        <AddEditContactModal
+          token={token}
+          contact={null}
+          onClose={() => setShowContactModal(false)}
+          onSaved={newContact => {
+            setResults(prev => [{ crm_contact_id: newContact.id, crm_name: newContact.name, contact_mobile: newContact.mobile, address: newContact.address, suburb: newContact.suburb, do_not_call: newContact.do_not_call, propensity_score: 0 }, ...prev]);
+            setTotalCount(prev => prev + 1);
+            setSearched(true);
+          }}
+        />
+      )}
 
       {/* Results header */}
       {searched && !loading && (
@@ -3132,6 +3244,13 @@ function SearchPage({ token }) {
               onDeleted={(deleted) => {
                 setResults(prev => prev.filter(r => (r.crm_contact_id || r.property_id) !== (deleted.crm_contact_id || deleted.property_id)));
                 setTotalCount(prev => prev - 1);
+              }}
+              onEdited={(updated) => {
+                setResults(prev => prev.map(r =>
+                  r.crm_contact_id === updated.id
+                    ? { ...r, crm_name: updated.name, contact_mobile: updated.mobile, address: updated.address, suburb: updated.suburb, do_not_call: updated.do_not_call }
+                    : r
+                ));
               }}
             />
           ))}
