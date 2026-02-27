@@ -2700,3 +2700,102 @@ body::before {
     right: 18px;
   }
 }
+
+/* ── Edit / Notes buttons on ProspectCard ─────────────────────────────── */
+.prospect-edit-btn,
+.prospect-notes-btn {
+  background: none; border: none;
+  color: var(--text-muted, #888);
+  cursor: pointer; padding: 2px 3px;
+  display: inline-flex; align-items: center;
+  opacity: 0.6; transition: opacity 0.15s, color 0.15s;
+}
+.prospect-edit-btn:hover  { opacity: 1; color: #d4a843; }
+.prospect-notes-btn:hover { opacity: 1; color: #d4a843; }
+
+/* ── Modal shared ─────────────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  z-index: 1000; display: flex; align-items: center; justify-content: center;
+}
+.modal-box {
+  background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
+  width: 360px; max-width: 95vw; max-height: 80vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+.modal-box--notes { width: 420px; }
+.modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px 10px; border-bottom: 1px solid #2a2a2a;
+}
+.modal-title  { font-size: 13px; font-weight: 600; color: #d4a843; letter-spacing: 0.04em; }
+.modal-close  { background: none; border: none; color: #666; cursor: pointer; padding: 2px; }
+.modal-close:hover { color: #aaa; }
+.modal-body   { padding: 14px; overflow-y: auto; flex: 1; }
+.modal-footer { padding: 10px 14px; border-top: 1px solid #2a2a2a; display: flex; justify-content: flex-end; gap: 8px; }
+.modal-btn    { font-size: 12px; padding: 5px 14px; border-radius: 4px; cursor: pointer; border: none; font-weight: 500; }
+.modal-btn--cancel { background: #2a2a2a; color: #aaa; }
+.modal-btn--cancel:hover { background: #333; }
+.modal-btn--save   { background: #d4a843; color: #111; }
+.modal-btn--save:hover   { background: #e0b54c; }
+.modal-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ── Edit Contact form ────────────────────────────────────────────────── */
+.edit-field { margin-bottom: 10px; }
+.edit-field--inline { display: flex; align-items: center; gap: 10px; }
+.edit-label { display: block; font-size: 11px; color: #888; margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.05em; }
+.edit-input {
+  width: 100%; background: #111; border: 1px solid #333; border-radius: 4px;
+  color: #e0e0e0; font-size: 13px; padding: 6px 8px; box-sizing: border-box;
+}
+.edit-input:focus { outline: none; border-color: #d4a843; }
+.edit-checkbox { width: 16px; height: 16px; accent-color: #d4a843; cursor: pointer; }
+.edit-error    { color: #f87171; font-size: 12px; margin-top: 6px; }
+
+/* ── Notes Modal ──────────────────────────────────────────────────────── */
+.notes-add-section { margin-bottom: 12px; }
+.notes-textarea {
+  width: 100%; background: #111; border: 1px solid #333; border-radius: 4px;
+  color: #e0e0e0; font-size: 13px; padding: 8px; box-sizing: border-box;
+  resize: vertical; min-height: 70px;
+}
+.notes-textarea:focus { outline: none; border-color: #d4a843; }
+.notes-add-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+.notes-btn-reminder-toggle {
+  background: none; border: 1px solid #333; color: #888; border-radius: 4px;
+  font-size: 11px; padding: 4px 8px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.notes-btn-reminder-toggle:hover { color: #d4a843; border-color: #d4a843; }
+
+.notes-reminder-section {
+  background: #111; border: 1px solid #2a2a2a; border-radius: 6px;
+  padding: 10px 12px; margin-bottom: 12px;
+}
+.notes-reminder-saved { color: #22c55e; font-size: 11px; margin-top: 6px; display: flex; align-items: center; gap: 4px; }
+
+/* ── Duration picker (shared by notes modal + follow-up flow) ─────────── */
+.reminder-duration-row {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 8px 0;
+}
+.reminder-duration-label { font-size: 11px; color: #666; }
+.duration-quick {
+  font-size: 11px; padding: 3px 8px; border-radius: 4px; cursor: pointer;
+  border: 1px solid #333; background: #1a1a1a; color: #aaa;
+  transition: all 0.15s;
+}
+.duration-quick:hover { border-color: #d4a843; color: #d4a843; }
+.duration-quick.active { background: #2a2010; border-color: #d4a843; color: #d4a843; }
+
+/* ── Notes timeline ───────────────────────────────────────────────────── */
+.notes-timeline { margin-top: 4px; }
+.notes-loading, .notes-empty { color: #555; font-size: 12px; text-align: center; padding: 12px 0; }
+.notes-entry { border-left: 2px solid #333; padding: 6px 0 6px 10px; margin-bottom: 10px; }
+.notes-entry--note { border-left-color: #d4a843; }
+.notes-entry--call { border-left-color: #555; }
+.notes-entry-meta  { display: flex; gap: 8px; align-items: center; margin-bottom: 2px; }
+.notes-entry-type  { font-size: 10px; font-weight: 600; color: #888; text-transform: uppercase; letter-spacing: 0.05em; }
+.notes-entry--note .notes-entry-type { color: #d4a843; }
+.notes-entry-ts    { font-size: 10px; color: #555; }
+.notes-entry-text  { font-size: 12px; color: #ccc; line-height: 1.4; }
