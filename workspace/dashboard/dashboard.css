@@ -2832,3 +2832,125 @@ body::before {
   height: 20px;
   background: var(--border);
 }
+
+/* ── Agenda Widget ──────────────────────────────────────────── */
+.agenda-widget {
+  margin: 0 20px 12px;
+  background: var(--bg-surface);
+  border: 1px solid rgba(200,169,110,0.12);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.agenda-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid rgba(200,169,110,0.06);
+}
+.agenda-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+.agenda-next {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.agenda-chevron { margin-left: auto; color: var(--text-muted); }
+.agenda-body { padding: 4px 0 6px; }
+.agenda-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  transition: opacity 0.2s;
+}
+.agenda-item--done { opacity: 0.38; }
+.agenda-check {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 1px;
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.agenda-check-circle {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+}
+.agenda-item-icon { flex-shrink: 0; }
+.agenda-item-body { flex: 1; min-width: 0; }
+.agenda-item-label {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+.agenda-item-detail {
+  font-size: 10px;
+  color: var(--text-muted);
+  display: block;
+}
+.agenda-item-time {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.agenda-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 1px;
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+.agenda-remove:hover { opacity: 1; }
+.agenda-add-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px 2px;
+}
+.agenda-add-input {
+  flex: 1;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+}
+.agenda-add-input::placeholder { color: var(--text-muted); }
+.agenda-add-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 7px;
+  cursor: pointer;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+}
+.agenda-empty {
+  padding: 10px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+}

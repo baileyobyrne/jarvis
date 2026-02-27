@@ -8,7 +8,7 @@ const { spawn } = require('child_process');
 const { db }  = require('./lib/db.js');
 const multer  = require('multer');
 const axios   = require('axios');
-const { createCalendarEvent } = require('./lib/ical-calendar.js');
+const { createCalendarEvent, fetchTodayEvents } = require('./lib/ical-calendar.js');
 const upload  = multer({ dest: '/root/.openclaw/workspace/intel/' });
 
 const app  = express();
@@ -436,6 +436,27 @@ app.get('/api/stats/today', requireAuth, (req, res) => {
     if (counts[r.outcome] !== undefined) counts[r.outcome] = r.n;
   });
   res.json(counts);
+});
+
+// ── GET /api/agenda/today ─────────────────────────────────────────────────
+app.get('/api/agenda/today', requireAuth, async (req, res) => {
+  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+  const todayEnd   = new Date(); todayEnd.setHours(23, 59, 59, 999);
+
+  const reminders = db.prepare(`
+    SELECT id, contact_name, contact_mobile, note, fire_at
+    FROM reminders
+    WHERE sent = 0 AND fire_at >= ? AND fire_at <= ?
+    ORDER BY fire_at ASC
+  `).all(todayStart.toISOString(), todayEnd.toISOString());
+
+  const planCount = db.prepare(`
+    SELECT COUNT(*) as n FROM daily_plans WHERE date(created_at) = date('now','localtime')
+  `).get().n;
+
+  const calEvents = await fetchTodayEvents();
+
+  res.json({ events: calEvents, reminders, planCount });
 });
 
 // GET /api/contacts/today — returns today's planned contacts, enriched from RP data

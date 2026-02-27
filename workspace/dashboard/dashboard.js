@@ -259,6 +259,124 @@ function CallStatsBar({ token }) {
   );
 }
 
+// ── Agenda Widget ─────────────────────────────────────────────────────────
+function AgendaWidget({ token }) {
+  const [agenda,    setAgenda]    = useState(null);
+  const [collapsed, setCollapsed] = useState(false);
+  const [checked,   setChecked]   = useState(() => {
+    try { return JSON.parse(localStorage.getItem('jarvis_agenda_checked') || '{}'); }
+    catch { return {}; }
+  });
+  const [manualItems, setManualItems] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('jarvis_agenda_manual') || '[]'); }
+    catch { return []; }
+  });
+  const [newItem, setNewItem] = useState('');
+
+  useEffect(() => {
+    apiFetch('/api/agenda/today', token)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setAgenda(d))
+      .catch(() => {});
+  }, [token]);
+
+  const toggleCheck = (key) => {
+    setChecked(prev => {
+      const next = { ...prev, [key]: !prev[key] };
+      localStorage.setItem('jarvis_agenda_checked', JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const addManual = () => {
+    if (!newItem.trim()) return;
+    const items = [...manualItems, { id: Date.now(), text: newItem.trim() }];
+    setManualItems(items);
+    localStorage.setItem('jarvis_agenda_manual', JSON.stringify(items));
+    setNewItem('');
+  };
+
+  const removeManual = (id) => {
+    const items = manualItems.filter(i => i.id !== id);
+    setManualItems(items);
+    localStorage.setItem('jarvis_agenda_manual', JSON.stringify(items));
+  };
+
+  // Build unified item list: reminders first, then calendar events, then call plan, then manual
+  const items = [];
+  if (agenda) {
+    agenda.reminders.forEach((r, i) => items.push({
+      key: `rem_${r.id}`, type: 'reminder',
+      label: r.contact_name,
+      detail: r.note,
+      time: r.fire_at ? fmtTime(r.fire_at) : null,
+    }));
+    agenda.events.forEach((e, i) => items.push({
+      key: `ev_${i}`, type: 'event',
+      label: e.title,
+      detail: e.allDay ? 'All day' : null,
+      time: e.startTime || null,
+    }));
+    if (agenda.planCount > 0) items.push({
+      key: 'plan', type: 'plan',
+      label: `${agenda.planCount} contacts in today's call plan`,
+      detail: null, time: null,
+    });
+  }
+  manualItems.forEach(m => items.push({ key: `manual_${m.id}`, type: 'manual', label: m.text, detail: null, time: null, manualId: m.id }));
+
+  const typeIcon = { reminder: <Bell size={10} />, event: <Calendar size={10} />, plan: <Phone size={10} />, manual: <Check size={10} /> };
+  const typeColor = { reminder: 'var(--gold)', event: '#3b82f6', plan: '#22c55e', manual: 'var(--text-muted)' };
+
+  const nextItem = items.find(i => !checked[i.key]);
+
+  return (
+    <div className="agenda-widget">
+      <div className="agenda-header" onClick={() => setCollapsed(c => !c)}>
+        <Calendar size={11} style={{ color: 'var(--gold)' }} />
+        <span className="agenda-title">Today's Agenda</span>
+        {collapsed && nextItem && (
+          <span className="agenda-next">{nextItem.time && `${nextItem.time} \u00b7 `}{nextItem.label}</span>
+        )}
+        <span className="agenda-chevron">{collapsed ? <ChevronDown size={12} /> : <ChevronUp size={12} />}</span>
+      </div>
+      {!collapsed && (
+        <div className="agenda-body">
+          {items.length === 0 && !agenda && <div className="agenda-empty">Loading\u2026</div>}
+          {items.length === 0 && agenda && <div className="agenda-empty">No agenda items today</div>}
+          {items.map(item => (
+            <div key={item.key} className={`agenda-item${checked[item.key] ? ' agenda-item--done' : ''}`}>
+              <button className="agenda-check" onClick={() => toggleCheck(item.key)}>
+                {checked[item.key] ? <Check size={11} style={{ color: '#22c55e' }} /> : <div className="agenda-check-circle" />}
+              </button>
+              <span className="agenda-item-icon" style={{ color: typeColor[item.type] }}>{typeIcon[item.type]}</span>
+              <div className="agenda-item-body">
+                <span className="agenda-item-label">{item.label}</span>
+                {item.detail && <span className="agenda-item-detail">{item.detail}</span>}
+              </div>
+              {item.time && <span className="agenda-item-time">{item.time}</span>}
+              {item.type === 'manual' && (
+                <button className="agenda-remove" onClick={() => removeManual(item.manualId)}><X size={9} /></button>
+              )}
+            </div>
+          ))}
+          <div className="agenda-add-row">
+            <input
+              className="agenda-add-input"
+              type="text"
+              placeholder="Add task\u2026"
+              value={newItem}
+              onChange={e => setNewItem(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && addManual()}
+            />
+            <button className="agenda-add-btn" onClick={addManual}><Plus size={11} /></button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Alert Banner ───────────────────────────────────────────────────────────
 function AlertBanner({ alerts }) {
   if (!alerts || alerts.length === 0) return null;
@@ -1329,6 +1447,7 @@ function CallsPage({ token, onReminderCountChange }) {
 
   return (
     <>
+      <AgendaWidget token={token} />
       <StatusStrip status={status} planCount={plan.length} calledCount={called.length} />
 
       {/* Mobile column tabs */}
