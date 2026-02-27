@@ -10,7 +10,7 @@ const {
   MapPin, Calendar, Check, X, AlertCircle, Home, Activity,
   MessageSquare, PhoneCall, PhoneOff, PhoneMissed, Star, RefreshCw,
   History, Menu, Building2, CheckCircle, Bed, Bath, Car, Plus, Mail,
-  Search, Pencil, Trash2, Copy, SortAsc
+  Search, Pencil, Trash2, Copy, SortAsc, Send
 } = LucideReact;
 
 // SMS link helper — opens iMessages on macOS
@@ -2254,6 +2254,129 @@ function BottomTabBar({ page, onNav }) {
   );
 }
 
+// ── Jarvis Chat Panel ────────────────────────────────────────────────────────
+function JarvisChat({ token }) {
+  const [open, setOpen]         = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [input, setInput]       = useState('');
+  const [thinking, setThinking] = useState(false);
+  const [actionMsg, setActionMsg] = useState('');
+  const bottomRef = useRef(null);
+  const inputRef  = useRef(null);
+
+  useEffect(() => {
+    if (open && bottomRef.current) bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, open]);
+
+  useEffect(() => {
+    if (open && inputRef.current) inputRef.current.focus();
+  }, [open]);
+
+  const send = useCallback(async () => {
+    const text = input.trim();
+    if (!text || thinking) return;
+    const newMessages = [...messages, { role: 'user', content: text }];
+    setMessages(newMessages);
+    setInput('');
+    setThinking(true);
+    try {
+      const res = await apiFetch('/api/chat', token, {
+        method: 'POST',
+        body: JSON.stringify({ messages: newMessages }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMessages(prev => [...prev, { role: 'assistant', content: data.reply }]);
+        if (data.action?.type === 'price_updated') {
+          setActionMsg(`✅ Price recorded for event #${data.action.event_id}: ${data.action.price}`);
+          setTimeout(() => setActionMsg(''), 6000);
+        }
+      } else {
+        setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I hit an error. Please try again.' }]);
+      }
+    } catch (_) {
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Network error. Please try again.' }]);
+    } finally {
+      setThinking(false);
+    }
+  }, [input, messages, thinking, token]);
+
+  const handleKey = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  };
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="jarvis-chat-fab"
+        title="Chat with Jarvis"
+      >
+        {open ? <X size={20} /> : <MessageSquare size={20} />}
+      </button>
+
+      {open && (
+        <div className="jarvis-chat-panel">
+          <div className="jarvis-chat-header">
+            <span className="jarvis-chat-title">JARVIS</span>
+            <span className="jarvis-chat-subtitle">AI ASSISTANT</span>
+            {actionMsg && <span style={{ marginLeft: 8, color: '#22c55e', fontSize: 10 }}>{actionMsg}</span>}
+            <button
+              onClick={() => setMessages([])}
+              style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 10, padding: '0 4px' }}
+            >Clear</button>
+            <button
+              onClick={() => setOpen(false)}
+              style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '0 2px' }}
+            ><X size={14} /></button>
+          </div>
+
+          <div className="jarvis-chat-messages">
+            {messages.length === 0 && (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: '24px 12px', lineHeight: 1.6 }}>
+                Ask me about recent sales, comparable prices, or talking points for prospecting calls.<br/>
+                <span style={{ fontSize: 10, opacity: 0.6 }}>You can also say "49 Penshurst sold for $1.2M" to record a price.</span>
+              </div>
+            )}
+            {messages.map((m, i) => (
+              <div key={i} className={`jarvis-msg jarvis-msg--${m.role}`}>
+                <div className="jarvis-msg-bubble">{m.content}</div>
+              </div>
+            ))}
+            {thinking && (
+              <div className="jarvis-msg jarvis-msg--assistant">
+                <div className="jarvis-msg-bubble jarvis-msg-thinking">
+                  <span className="jarvis-dot" /><span className="jarvis-dot" /><span className="jarvis-dot" />
+                </div>
+              </div>
+            )}
+            <div ref={bottomRef} />
+          </div>
+
+          <div className="jarvis-chat-input-row">
+            <textarea
+              ref={inputRef}
+              className="jarvis-chat-input"
+              placeholder="Ask Jarvis…  (Enter to send)"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={handleKey}
+              rows={2}
+            />
+            <button
+              className="jarvis-chat-send"
+              onClick={send}
+              disabled={!input.trim() || thinking}
+            >
+              <Send size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ── App ────────────────────────────────────────────────────────────────────
 function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem('jarvis_token') || '');
@@ -2336,6 +2459,7 @@ function App() {
         {renderPage()}
       </main>
       <BottomTabBar page={page} onNav={handleNav} />
+      <JarvisChat token={token} />
     </div>
   );
 }
