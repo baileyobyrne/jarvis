@@ -1208,6 +1208,7 @@ app.delete('/api/contacts/:id', requireAuth, (req, res) => {
       db.prepare('DELETE FROM daily_plans WHERE contact_id = ?').run(id);
       db.prepare('DELETE FROM listing_watchers WHERE contact_id = ?').run(id);
       db.prepare('DELETE FROM call_log WHERE contact_id = ?').run(id);
+      db.prepare('UPDATE buyer_profiles SET contact_id = NULL WHERE contact_id = ?').run(id);
       db.prepare('DELETE FROM contacts WHERE id = ?').run(id);
     })();
     res.json({ ok: true });
