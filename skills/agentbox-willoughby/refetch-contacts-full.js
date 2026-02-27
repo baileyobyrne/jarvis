@@ -68,7 +68,7 @@ function save(contacts, lastPage, lastSuburbIdx) {
 }
 
 (async () => {
-  const browser = await chromium.launch({ headless: true, args: ['--disable-web-security'] });
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-web-security'] });
   const context = fs.existsSync(STATEFILE)
     ? await browser.newContext({ storageState: STATEFILE, bypassCSP: true })
     : await browser.newContext({ bypassCSP: true });

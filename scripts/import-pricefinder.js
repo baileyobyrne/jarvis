@@ -495,8 +495,14 @@ console.log('\n[import] Step D — linking properties to contacts');
 const linkResult = db.prepare(`
   UPDATE properties SET contact_id = (
     SELECT c.id FROM contacts c
-    WHERE LOWER(c.address) LIKE '%' || LOWER(properties.street_number) || ' ' || LOWER(properties.street_name) || '%'
-      AND (LOWER(COALESCE(c.suburb,'')) LIKE '%willoughby%' OR LOWER(COALESCE(properties.suburb,'')) LIKE '%willoughby%')
+    WHERE (
+      -- Must be preceded by start-of-string or a space/slash to avoid "53" matching property "3"
+      LOWER(c.address) LIKE LOWER(properties.street_number) || ' ' || LOWER(properties.street_name) || '%'
+      OR LOWER(c.address) LIKE '% ' || LOWER(properties.street_number) || ' ' || LOWER(properties.street_name) || '%'
+      OR LOWER(c.address) LIKE LOWER(properties.street_number) || '/' || LOWER(properties.street_name) || '%'
+      OR LOWER(c.address) LIKE '% ' || LOWER(properties.street_number) || '/' || LOWER(properties.street_name) || '%'
+    )
+    AND (LOWER(COALESCE(c.suburb,'')) LIKE '%willoughby%' OR LOWER(COALESCE(properties.suburb,'')) LIKE '%willoughby%')
     LIMIT 1
   )
   WHERE contact_id IS NULL

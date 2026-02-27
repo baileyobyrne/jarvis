@@ -2039,12 +2039,80 @@ app.get('/api/search', requireAuth, (req, res) => {
       LIMIT ${pageSize} OFFSET ${offset}
     `).all(...params);
 
+    // ── Supplementary: AgentBox contacts not linked to any property ──────────
+    // When searching by street (or owner), surface contacts whose address
+    // matches but who have no property row pointing at them. This catches
+    // second residents at an address (e.g. Kate Younger at 15a Second Ave)
+    // and contacts whose property-link was never established.
+    let unlinkedRows = [];
+    if (street || owner) {
+      const callLogSubq = `
+        SELECT cl.contact_id, cl.called_at AS last_called_at, cl.outcome AS last_outcome, cl.notes AS last_note
+        FROM call_log cl
+        INNER JOIN (SELECT contact_id, MAX(called_at) AS max_at FROM call_log GROUP BY contact_id) latest
+          ON cl.contact_id = latest.contact_id AND cl.called_at = latest.max_at
+      `;
+      const uConds = ["c.id NOT LIKE 'pf_%'",
+        "NOT EXISTS (SELECT 1 FROM properties p2 WHERE p2.contact_id = c.id)"];
+      const uParams = [];
+
+      if (street) {
+        const normalizedStreet = abbrevStreetType(street.toLowerCase());
+        uConds.push("LOWER(c.address) LIKE ?");
+        uParams.push(`%${normalizedStreet}%`);
+      }
+      if (owner) {
+        uConds.push("LOWER(c.name) LIKE ?");
+        uParams.push(`%${owner.toLowerCase()}%`);
+      }
+      if (suburb && suburb !== 'all') {
+        uConds.push("(LOWER(COALESCE(c.suburb,'') || ' ' || COALESCE(c.address,'')) LIKE ?)");
+        uParams.push(`%${suburb.toLowerCase()}%`);
+      }
+      if (!showDnc) {
+        uConds.push("(c.do_not_call = 0 OR c.do_not_call IS NULL)");
+      }
+
+      unlinkedRows = db.prepare(`
+        SELECT
+          NULL              AS property_id,
+          c.address,
+          NULL              AS street_number,
+          NULL              AS street_name,
+          COALESCE(c.suburb,'') AS suburb,
+          c.beds, c.baths, c.cars, c.property_type,
+          NULL              AS owner_name,
+          NULL              AS government_number,
+          NULL              AS pf_phone,
+          c.do_not_call,
+          NULL              AS contact_id,
+          c.id              AS crm_contact_id,
+          c.name            AS crm_name,
+          c.mobile          AS crm_mobile,
+          c.propensity_score,
+          c.tenure_years,
+          c.occupancy,
+          c.contact_class,
+          c.mobile          AS contact_mobile,
+          lc.last_called_at,
+          lc.last_outcome,
+          lc.last_note
+        FROM contacts c
+        LEFT JOIN (${callLogSubq}) lc ON c.id = lc.contact_id
+        WHERE ${uConds.join(' AND ')}
+        ORDER BY COALESCE(c.propensity_score, 0) DESC, c.address
+      `).all(...uParams);
+    }
+
+    const combinedResults = [...rows, ...unlinkedRows];
+    const totalCount = countRow.n + unlinkedRows.length;
+
     res.json({
-      results:     rows,
-      total_count: countRow.n,
+      results:     combinedResults,
+      total_count: totalCount,
       page:        pageNum,
       page_size:   pageSize,
-      total_pages: Math.ceil(countRow.n / pageSize),
+      total_pages: Math.ceil(totalCount / pageSize),
     });
   } catch (e) {
     console.error('[GET /api/search]', e.message);

@@ -90,9 +90,10 @@ function main() {
 
   const invalid = core.filter(c => !c.id || !c.name);
   if (invalid.length > 0) {
-    console.error(`[backfill] ❌ ${invalid.length} contacts missing id or name — aborting.`);
-    process.exit(1);
+    console.warn(`[backfill] ⚠️  ${invalid.length} contacts missing id or name — skipping them.`);
+    invalid.forEach(c => console.warn(`  skipped: id=${c.id} name=${JSON.stringify(c.name)}`));
   }
+  const validCore = core.filter(c => c.id && c.name);
 
   const upsert = db.prepare(`
     INSERT INTO contacts
@@ -126,7 +127,7 @@ function main() {
 
   const runAll = db.transaction(() => {
     let upserted = 0;
-    for (const c of core) {
+    for (const c of validCore) {
       const street  = (c.address || '').toUpperCase().trim();
       const suburb  = normalizeSuburb(c.suburb || '');
       const rpKey   = `${street} ${suburb}`.trim();

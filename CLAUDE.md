@@ -72,6 +72,7 @@ The Notion Command Center will be replaced by a self-hosted web dashboard on the
 - **Snapshot Server:** `/root/.openclaw/snapshot-server.js` (PM2-managed, port 4242)
 
 ## 🛠️ Common Commands
+- **API testing (curl):** `source /root/.openclaw/.env && curl -sk -X POST https://localhost:4242/api/... -H "Authorization: Bearer $DASHBOARD_PASSWORD" -H "Content-Type: application/json" -d '{...}'`
 - **Test Pipeline A:** `node monitor-email.js` [cite: 2388]
 - **Test Pipeline B:** `node daily-planner.js` [cite: 1215]
 - **Update Database:** `node refetch-contacts-full.js` (uses Playwright session-interception)[cite: 1699, 2335].
@@ -80,6 +81,9 @@ The Notion Command Center will be replaced by a self-hosted web dashboard on the
 - **lucide-react CDN (index.html):** `lucide-react` UMD factory looks for `global.react` (lowercase). React CDN sets `window.React` (uppercase). Fix: add `<script>window.react = window.React;</script>` **before** the lucide-react script tag. Global destructure: `const { Phone, ... } = LucideReact;` (PascalCase).
 - **Playwright on VPS root:** Global install at `/usr/lib/node_modules/playwright`. Launch flags required: `args: ['--no-sandbox', '--disable-dev-shm-usage']`. Pricefinder lookup: `node workspace/pricefinder-lookup.js` (batch) or `node workspace/pricefinder-lookup.js --address "123 Main St"` (single). **MCP Playwright (`mcp__plugin_playwright`) cannot run as root** — Chrome sandbox restriction; use a project Playwright Node.js script instead.
 - **SQLite string literals:** Use single quotes `'|'` not double quotes `"|"`. Double quotes are identifier delimiters in SQLite.
+- **`buildScoredContactsForManual()` (snapshot-server.js):** Extracts a street keyword from the event address (strips leading number/unit + trailing street type, takes last word), awards +1000 score bonus to contacts on the same street, and excludes the vendor (contact whose address matches the event property). Returns up to 30 contacts.
+- **`properties` table address format:** UPPERCASE, abbreviated street types (AVENUE→AVE, STREET→ST, ROAD→RD). Suburbs covered: ARTARMON, CASTLECRAG, CHATSWOOD, MIDDLE COVE, NAREMBURN, NORTH WILLOUGHBY, WILLOUGHBY, WILLOUGHBY EAST. Not every street is present. When matching against market_events addresses, normalise abbreviations first. `market_events.proping_estimate` stores the pricefinder valuation for that property.
+- **Manual market events:** Addresses are normalised to UPPERCASE before DB storage to match the `properties` table format. After fixing scoring logic, delete and re-POST an event via API to rebuild its `top_contacts`.
 - **AgentBox buyer enquiries sync:** `node fetch-buyer-enquiries.js` — listing IDs hardcoded as `BAILEY_LISTING_IDS` (top of script). `filter[staffId]` is BROKEN like all other admin API filter params — returns entire office, not Bailey's. Admin API `x-api-key` is a **server-side session key invalidated when browser closes** — Node.js direct calls always return 401 ("Api Key does not exists.") even with correct cookies/headers. Architecture: browser stays open for admin API calls (page.evaluate), bearer API calls happen from Node.js in parallel (much faster). Default sync: page 1 only (50 most recent per listing); `--full` flag for deep backfill. Performance floor: ~2 min (Reapit admin API latency ~60s, irreducible). Triggered from dashboard via POST `/api/buyers/sync`. To add a new listing: append its ID to `BAILEY_LISTING_IDS`.
 
 ## 🔌 Active Plugins
