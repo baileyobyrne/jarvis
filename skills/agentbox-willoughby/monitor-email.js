@@ -280,7 +280,12 @@ function parseProping(subject, body, receivedDate) {
     if (!sectionType) continue;
 
     // Filter and split section content into non-empty lines
-    const lines = sectionContent.split('\n').map(l => l.trim()).filter(Boolean);
+    // Strip markdown-style image links [img]<url> and bare <url> artifacts from Proping emails
+    const cleanLine = (l) => l
+      .replace(/\[https?:\/\/[^\]]+\]\s*<https?:\/\/[^>]+>\s*/g, '')  // strip [img]<url>
+      .replace(/<https?:\/\/[^>]+>/g, '')                               // strip bare <url>
+      .trim();
+    const lines = sectionContent.split('\n').map(l => cleanLine(l.trim())).filter(Boolean);
 
     // Detect the start of a new property block.
     // Address lines: start with a digit, contain a comma (suburb separator),
