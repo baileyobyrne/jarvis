@@ -991,13 +991,16 @@ function CallsPage({ token, onReminderCountChange }) {
 function AddEventModal({ token, onClose, onAdded, editEvent }) {
   const isEdit = !!editEvent;
   const [form, setForm] = useState({
-    address:       editEvent?.address       || '',
-    type:          editEvent?.type          || 'sold',
-    beds:          editEvent?.beds          || '',
-    baths:         editEvent?.baths         || '',
-    cars:          editEvent?.cars          || '',
-    property_type: editEvent?.property_type || 'House',
-    price:         editEvent?.price         || '',
+    address:         editEvent?.address         || '',
+    type:            editEvent?.type            || 'sold',
+    beds:            editEvent?.beds            || '',
+    baths:           editEvent?.baths           || '',
+    cars:            editEvent?.cars            || '',
+    property_type:   editEvent?.property_type   || 'House',
+    price:           editEvent?.price           || '',
+    confirmed_price: editEvent?.confirmed_price || '',
+    sold_date:       editEvent?.sold_date        || '',
+    status:          editEvent?.status           || '',
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -1064,6 +1067,26 @@ function AddEventModal({ token, onClose, onAdded, editEvent }) {
 
         <label className="form-label">Price</label>
         <input className="form-input" type="text" placeholder="$1,250,000 or Undisclosed" value={form.price} onChange={e => set('price', e.target.value)} />
+
+        {(form.type === 'sold' || isEdit) && (
+          <>
+            <label className="form-label">Confirmed Sale Price <span style={{ color: '#22c55e', fontSize: 10 }}>(verified — overrides scraped)</span></label>
+            <input className="form-input" type="text" placeholder="$1,250,000" value={form.confirmed_price} onChange={e => set('confirmed_price', e.target.value)} />
+            <label className="form-label">Sold Date</label>
+            <input className="form-input" type="date" value={form.sold_date} onChange={e => set('sold_date', e.target.value)} />
+          </>
+        )}
+
+        {isEdit && (
+          <>
+            <label className="form-label">Status</label>
+            <select className="form-input" value={form.status} onChange={e => set('status', e.target.value)}>
+              <option value="active">Active Listing</option>
+              <option value="sold">Sold</option>
+              <option value="withdrawn">Withdrawn</option>
+            </select>
+          </>
+        )}
 
         {error && <div style={{ color: '#f87171', fontSize: 12, marginTop: 8 }}>{error}</div>}
 
@@ -1230,6 +1253,13 @@ function MarketPage({ token }) {
                         </>
                       ) : (
                         <>
+                          {isPriceWithheld && ev.type === 'sold' && (
+                            <button
+                              onClick={() => { setEditEvent({ ...ev, status: ev.status || 'sold' }); setShowAddModal(true); }}
+                              title="Record sale price"
+                              style={{ background: '#f59e0b22', border: '1px solid #f59e0b', color: '#f59e0b', borderRadius: 4, padding: '2px 6px', fontSize: 9, cursor: 'pointer', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}
+                            >$ Price</button>
+                          )}
                           {refreshingId === ev.id ? (
                             <span style={{ background: 'none', border: 'none', color: 'var(--text-muted)', padding: 2, display: 'flex', alignItems: 'center' }}>
                               <RefreshCw size={12} style={{ animation: 'spin 1s linear infinite' }} />
