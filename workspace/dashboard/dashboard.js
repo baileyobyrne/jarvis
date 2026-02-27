@@ -711,9 +711,10 @@ function ContactNotesModal({ contact, token, onClose }) {
                   {savingRem ? 'Saving\u2026' : 'Save Reminder'}
                 </button>
               </div>
-              {remSaved && <div className="notes-reminder-saved"><Check size={11} /> Reminder saved</div>}
             </div>
           )}
+
+          {remSaved && <div className="notes-reminder-saved"><Check size={11} /> Reminder saved</div>}
 
           <div className="notes-timeline">
             {loading && <div className="notes-loading">Loading\u2026</div>}
