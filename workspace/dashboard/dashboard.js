@@ -2018,10 +2018,10 @@ function SearchPage({ token }) {
       {searched && !loading && (
         <div className="search-results-header">
           {totalCount === 0 ? (
-            <span>No properties found</span>
+            <span>No results found</span>
           ) : (
             <>
-              <span>Found <strong>{totalCount}</strong> properties</span>
+              <span>Found <strong>{totalCount}</strong> contacts & properties</span>
               {totalCount > 50 && <span> · Showing {pageStart}–{pageEnd}</span>}
             </>
           )}
@@ -2060,7 +2060,7 @@ function SearchPage({ token }) {
       {!searched && !loading && (
         <div className="empty-state" style={{ marginTop: 40 }}>
           <div className="empty-state-icon" style={{ color: '#3b82f6' }}><Search size={32} /></div>
-          <div className="empty-state-title">Search 4,381 properties</div>
+          <div className="empty-state-title">Search contacts & properties</div>
           <div className="empty-state-sub">Filter by street, type, beds, or owner name</div>
         </div>
       )}
@@ -2209,7 +2209,7 @@ function App() {
     market: { title: 'Market Events', subtitle: 'RECENT ACTIVITY — 14 DAYS' },
     buyers: { title: 'Buyer Enquiries', subtitle: 'ACTIVE CALL LIST' },
     reminders: { title: 'Reminders', subtitle: 'UPCOMING FOLLOW-UPS' },
-    search: { title: 'Property Search', subtitle: 'PRICEFINDER DATABASE — 4,381 PROPERTIES' },
+    search: { title: 'Property Search', subtitle: 'CRM + PRICEFINDER — CONTACTS & PROPERTIES' },
     history: { title: 'Call History', subtitle: 'TODAY\'S LOGGED OUTCOMES' }
   };
   const pt = pageTitles[page] || pageTitles.calls;

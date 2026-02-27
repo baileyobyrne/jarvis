@@ -1944,175 +1944,141 @@ app.get('/api/search', requireAuth, (req, res) => {
     const offset   = (pageNum - 1) * pageSize;
     const showDnc  = show_dnc === '1' || show_dnc === 'true';
 
-    const conditions = [];
-    const params     = [];
+    // ── Build WHERE conditions for both sources in parallel ──────────────
+    const linkedConds   = [];
+    const linkedParams  = [];
+    const unlinkedConds = [
+      "c.id NOT LIKE 'pf_%'",
+      "NOT EXISTS (SELECT 1 FROM properties p2 WHERE p2.contact_id = c.id)",
+      "(c.address IS NOT NULL AND c.address != '')",
+    ];
+    const unlinkedParams = [];
 
     if (street) {
-      // Normalize full street type names to match the abbreviated format in the properties table
       const normalizedStreet = abbrevStreetType(street.toLowerCase());
-      conditions.push("(LOWER(p.street_name) LIKE ? OR LOWER(p.address) LIKE ?)");
-      params.push(`%${normalizedStreet}%`, `%${normalizedStreet}%`);
+      linkedConds.push("(LOWER(p.street_name) LIKE ? OR LOWER(p.address) LIKE ?)");
+      linkedParams.push(`%${normalizedStreet}%`, `%${normalizedStreet}%`);
+      unlinkedConds.push("LOWER(c.address) LIKE ?");
+      unlinkedParams.push(`%${normalizedStreet}%`);
     }
     if (suburb && suburb !== 'all') {
-      // Willoughby / Willoughby East / North Willoughby are all the same farm area.
-      // AgentBox often records contacts under "Willoughby" regardless of exact sub-suburb.
-      // We search the properties table (which has accurate Pricefinder suburb data) so
-      // filtering by specific sub-suburb here works correctly.
-      conditions.push("LOWER(p.suburb) LIKE ?");
-      params.push(`%${suburb.toLowerCase()}%`);
+      linkedConds.push("LOWER(p.suburb) LIKE ?");
+      linkedParams.push(`%${suburb.toLowerCase()}%`);
+      unlinkedConds.push("LOWER(c.suburb) LIKE ?");
+      unlinkedParams.push(`%${suburb.toLowerCase()}%`);
     }
     if (type && type !== 'all') {
-      conditions.push("LOWER(p.property_type) = ?");
-      params.push(type.toLowerCase());
+      linkedConds.push("LOWER(p.property_type) = ?");
+      linkedParams.push(type.toLowerCase());
+      unlinkedConds.push("LOWER(c.property_type) LIKE ?");
+      unlinkedParams.push(`%${type.toLowerCase()}%`);
     }
     if (beds_min) {
-      conditions.push("p.beds >= ?");
-      params.push(parseInt(beds_min));
+      linkedConds.push("p.beds >= ?");
+      linkedParams.push(parseInt(beds_min));
+      unlinkedConds.push("CAST(c.beds AS INTEGER) >= ?");
+      unlinkedParams.push(parseInt(beds_min));
     }
     if (beds_max) {
-      conditions.push("p.beds <= ?");
-      params.push(parseInt(beds_max));
+      linkedConds.push("p.beds <= ?");
+      linkedParams.push(parseInt(beds_max));
+      unlinkedConds.push("CAST(c.beds AS INTEGER) <= ?");
+      unlinkedParams.push(parseInt(beds_max));
     }
     if (owner) {
-      conditions.push("(LOWER(p.owner_name) LIKE ? OR LOWER(c.name) LIKE ?)");
-      params.push(`%${owner.toLowerCase()}%`, `%${owner.toLowerCase()}%`);
+      linkedConds.push("(LOWER(p.owner_name) LIKE ? OR LOWER(c.name) LIKE ?)");
+      linkedParams.push(`%${owner.toLowerCase()}%`, `%${owner.toLowerCase()}%`);
+      unlinkedConds.push("LOWER(c.name) LIKE ?");
+      unlinkedParams.push(`%${owner.toLowerCase()}%`);
     }
     if (!showDnc) {
-      conditions.push("(p.do_not_call = 0 OR p.do_not_call IS NULL)");
+      linkedConds.push("(p.do_not_call = 0 OR p.do_not_call IS NULL)");
+      unlinkedConds.push("(c.do_not_call = 0 OR c.do_not_call IS NULL)");
     }
 
-    const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+    const linkedWhere   = linkedConds.length ? 'WHERE ' + linkedConds.join(' AND ') : '';
+    const unlinkedWhere = 'WHERE ' + unlinkedConds.join(' AND ');
 
-    // ORDER BY depends on sort_by param
-    let orderBy;
-    if (sort_by === 'address_asc') {
-      orderBy = 'ORDER BY p.street_name ASC, CAST(p.street_number AS INTEGER) ASC, p.street_number ASC';
-    } else if (sort_by === 'last_contacted') {
-      orderBy = 'ORDER BY lc.last_called_at DESC NULLS LAST, COALESCE(c.propensity_score, 0) DESC';
-    } else {
-      // default: propensity score descending, then address
-      orderBy = 'ORDER BY CASE WHEN c.propensity_score > 0 THEN 0 ELSE 1 END, COALESCE(c.propensity_score, 0) DESC, p.suburb, p.street_name, CAST(p.street_number AS INTEGER) ASC';
-    }
+    const callLogSubq = `
+      SELECT cl.contact_id, cl.called_at AS last_called_at, cl.outcome AS last_outcome, cl.notes AS last_note
+      FROM call_log cl
+      INNER JOIN (SELECT contact_id, MAX(called_at) AS max_at FROM call_log GROUP BY contact_id) latest
+        ON cl.contact_id = latest.contact_id AND cl.called_at = latest.max_at
+    `;
 
-    const countRow = db.prepare(`
-      SELECT COUNT(*) AS n
-      FROM properties p
-      LEFT JOIN contacts c ON p.contact_id = c.id
-      LEFT JOIN (
-        SELECT cl.contact_id, cl.called_at AS last_called_at, cl.outcome AS last_outcome, cl.notes AS last_note
-        FROM call_log cl
-        INNER JOIN (SELECT contact_id, MAX(called_at) AS max_at FROM call_log GROUP BY contact_id) latest
-          ON cl.contact_id = latest.contact_id AND cl.called_at = latest.max_at
-      ) lc ON c.id = lc.contact_id
-      ${where}
-    `).get(...params);
-
-    const rows = db.prepare(`
+    // UNION of Pricefinder properties (with optional linked contact) +
+    // AgentBox contacts that have no property row linking to them.
+    // Both halves expose identical columns so SQLite can sort/page the combined set.
+    const unionSql = `
       SELECT
         p.id AS property_id,
         p.address, p.street_number, p.street_name, p.suburb,
         p.beds, p.baths, p.cars, p.property_type,
         p.owner_name, p.government_number,
-        p.pf_phone, p.do_not_call,
+        p.pf_phone,
+        CASE WHEN p.do_not_call = 1 OR c.do_not_call = 1 THEN 1 ELSE 0 END AS do_not_call,
         p.contact_id,
-        c.id AS crm_contact_id,
-        c.name AS crm_name,
+        c.id     AS crm_contact_id,
+        c.name   AS crm_name,
         c.mobile AS crm_mobile,
-        c.propensity_score,
-        c.tenure_years,
-        c.occupancy,
-        c.contact_class,
+        COALESCE(c.propensity_score, 0) AS propensity_score,
+        c.tenure_years, c.occupancy, c.contact_class,
         COALESCE(c.mobile, p.pf_phone) AS contact_mobile,
-        lc.last_called_at,
-        lc.last_outcome,
-        lc.last_note
+        lc.last_called_at, lc.last_outcome, lc.last_note,
+        COALESCE(c.propensity_score, 0)             AS _score,
+        p.suburb || ' ' || p.street_name            AS _sort
       FROM properties p
       LEFT JOIN contacts c ON p.contact_id = c.id
-      LEFT JOIN (
-        SELECT cl.contact_id, cl.called_at AS last_called_at, cl.outcome AS last_outcome, cl.notes AS last_note
-        FROM call_log cl
-        INNER JOIN (SELECT contact_id, MAX(called_at) AS max_at FROM call_log GROUP BY contact_id) latest
-          ON cl.contact_id = latest.contact_id AND cl.called_at = latest.max_at
-      ) lc ON c.id = lc.contact_id
-      ${where}
-      ${orderBy}
-      LIMIT ${pageSize} OFFSET ${offset}
-    `).all(...params);
+      LEFT JOIN (${callLogSubq}) lc ON c.id = lc.contact_id
+      ${linkedWhere}
 
-    // ── Supplementary: AgentBox contacts not linked to any property ──────────
-    // When searching by street (or owner), surface contacts whose address
-    // matches but who have no property row pointing at them. This catches
-    // second residents at an address (e.g. Kate Younger at 15a Second Ave)
-    // and contacts whose property-link was never established.
-    let unlinkedRows = [];
-    if (street || owner) {
-      const callLogSubq = `
-        SELECT cl.contact_id, cl.called_at AS last_called_at, cl.outcome AS last_outcome, cl.notes AS last_note
-        FROM call_log cl
-        INNER JOIN (SELECT contact_id, MAX(called_at) AS max_at FROM call_log GROUP BY contact_id) latest
-          ON cl.contact_id = latest.contact_id AND cl.called_at = latest.max_at
-      `;
-      const uConds = ["c.id NOT LIKE 'pf_%'",
-        "NOT EXISTS (SELECT 1 FROM properties p2 WHERE p2.contact_id = c.id)"];
-      const uParams = [];
+      UNION ALL
 
-      if (street) {
-        const normalizedStreet = abbrevStreetType(street.toLowerCase());
-        uConds.push("LOWER(c.address) LIKE ?");
-        uParams.push(`%${normalizedStreet}%`);
-      }
-      if (owner) {
-        uConds.push("LOWER(c.name) LIKE ?");
-        uParams.push(`%${owner.toLowerCase()}%`);
-      }
-      if (suburb && suburb !== 'all') {
-        uConds.push("(LOWER(COALESCE(c.suburb,'') || ' ' || COALESCE(c.address,'')) LIKE ?)");
-        uParams.push(`%${suburb.toLowerCase()}%`);
-      }
-      if (!showDnc) {
-        uConds.push("(c.do_not_call = 0 OR c.do_not_call IS NULL)");
-      }
+      SELECT
+        NULL AS property_id,
+        c.address, NULL AS street_number, NULL AS street_name,
+        COALESCE(c.suburb, '') AS suburb,
+        CAST(c.beds AS INTEGER) AS beds,
+        CAST(c.baths AS INTEGER) AS baths,
+        CAST(c.cars AS INTEGER) AS cars,
+        c.property_type,
+        NULL AS owner_name, NULL AS government_number, NULL AS pf_phone,
+        c.do_not_call,
+        NULL AS contact_id,
+        c.id     AS crm_contact_id,
+        c.name   AS crm_name,
+        c.mobile AS crm_mobile,
+        COALESCE(c.propensity_score, 0) AS propensity_score,
+        c.tenure_years, c.occupancy, c.contact_class,
+        c.mobile AS contact_mobile,
+        lc.last_called_at, lc.last_outcome, lc.last_note,
+        COALESCE(c.propensity_score, 0)                          AS _score,
+        COALESCE(c.suburb, '') || ' ' || COALESCE(c.address, '') AS _sort
+      FROM contacts c
+      LEFT JOIN (${callLogSubq}) lc ON c.id = lc.contact_id
+      ${unlinkedWhere}
+    `;
 
-      unlinkedRows = db.prepare(`
-        SELECT
-          NULL              AS property_id,
-          c.address,
-          NULL              AS street_number,
-          NULL              AS street_name,
-          COALESCE(c.suburb,'') AS suburb,
-          c.beds, c.baths, c.cars, c.property_type,
-          NULL              AS owner_name,
-          NULL              AS government_number,
-          NULL              AS pf_phone,
-          c.do_not_call,
-          NULL              AS contact_id,
-          c.id              AS crm_contact_id,
-          c.name            AS crm_name,
-          c.mobile          AS crm_mobile,
-          c.propensity_score,
-          c.tenure_years,
-          c.occupancy,
-          c.contact_class,
-          c.mobile          AS contact_mobile,
-          lc.last_called_at,
-          lc.last_outcome,
-          lc.last_note
-        FROM contacts c
-        LEFT JOIN (${callLogSubq}) lc ON c.id = lc.contact_id
-        WHERE ${uConds.join(' AND ')}
-        ORDER BY COALESCE(c.propensity_score, 0) DESC, c.address
-      `).all(...uParams);
+    let orderBy;
+    if (sort_by === 'address_asc') {
+      orderBy = 'ORDER BY _sort ASC';
+    } else if (sort_by === 'last_contacted') {
+      orderBy = 'ORDER BY last_called_at DESC NULLS LAST, _score DESC';
+    } else {
+      orderBy = 'ORDER BY CASE WHEN _score > 0 THEN 0 ELSE 1 END, _score DESC, _sort ASC';
     }
 
-    const combinedResults = [...rows, ...unlinkedRows];
-    const totalCount = countRow.n + unlinkedRows.length;
+    const allParams = [...linkedParams, ...unlinkedParams];
+
+    const countRow = db.prepare(`SELECT COUNT(*) AS n FROM (${unionSql})`).get(allParams);
+    const rows     = db.prepare(`SELECT * FROM (${unionSql}) ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`).all(allParams);
 
     res.json({
-      results:     combinedResults,
-      total_count: totalCount,
+      results:     rows,
+      total_count: countRow.n,
       page:        pageNum,
       page_size:   pageSize,
-      total_pages: Math.ceil(totalCount / pageSize),
+      total_pages: Math.ceil(countRow.n / pageSize),
     });
   } catch (e) {
     console.error('[GET /api/search]', e.message);
