@@ -1249,12 +1249,32 @@ app.get('/api/market', requireAuth, (req, res) => {
       ? `AND COALESCE(status, CASE WHEN type='sold' THEN 'sold' WHEN type='unlisted' THEN 'withdrawn' ELSE 'active' END) = '${statusFilter}'`
       : '';
 
+    const VALID_PROPERTY_TYPES = ['house', 'unit', 'townhouse', 'all'];
+    const propertyTypeParam   = (req.query.property_type || '').toLowerCase();
+    const propertyTypeFilter  = VALID_PROPERTY_TYPES.includes(propertyTypeParam) ? propertyTypeParam : 'all';
+    const propertyTypeWhere   = propertyTypeFilter !== 'all'
+      ? `AND LOWER(COALESCE(property_type, '')) LIKE ?`
+      : '';
+
+    const VALID_SORTS = ['newest', 'oldest', 'price_high', 'price_low'];
+    const sortParam   = VALID_SORTS.includes(req.query.sort) ? req.query.sort : 'newest';
+    const orderBy     = {
+      newest:     'ORDER BY detected_at DESC',
+      oldest:     'ORDER BY detected_at ASC',
+      price_high: "ORDER BY CAST(REPLACE(REPLACE(COALESCE(confirmed_price, price, ''), '$', ''), ',', '') AS INTEGER) DESC",
+      price_low:  "ORDER BY CAST(REPLACE(REPLACE(COALESCE(confirmed_price, price, ''), '$', ''), ',', '') AS INTEGER) ASC",
+    }[sortParam];
+
+    const liveParams = [String(days)];
+    if (propertyTypeFilter !== 'all') liveParams.push(`%${propertyTypeFilter}%`);
+
     const liveRows = db.prepare(`
       SELECT *, 'market_event' AS record_source FROM market_events
       WHERE detected_at >= datetime('now', '-' || ? || ' days')
       ${statusWhere}
-      ORDER BY detected_at DESC LIMIT 200
-    `).all(String(days));
+      ${propertyTypeWhere}
+      ${orderBy} LIMIT 200
+    `).all(...liveParams);
 
     // Build pf_estimate lookup map from properties table (normalise street type abbreviations)
     const normForPf = (addr) => (addr || '').toUpperCase()
@@ -1317,7 +1337,19 @@ app.get('/api/market', requireAuth, (req, res) => {
         seen.add(normForPf(h.address));
       }
     }
+    const parsePrice = (r) => {
+      const raw = (r.confirmed_price || r.price || '').toString().replace(/[$,]/g, '');
+      return parseInt(raw, 10) || 0;
+    };
     merged.sort((a, b) => {
+      if (sortParam === 'oldest') {
+        const ta = new Date(a.detected_at || a.event_date || 0).getTime();
+        const tb = new Date(b.detected_at || b.event_date || 0).getTime();
+        return ta - tb;
+      }
+      if (sortParam === 'price_high') return parsePrice(b) - parsePrice(a);
+      if (sortParam === 'price_low')  return parsePrice(a) - parsePrice(b);
+      // default: newest
       const ta = new Date(a.detected_at || a.event_date || 0).getTime();
       const tb = new Date(b.detected_at || b.event_date || 0).getTime();
       return tb - ta;
