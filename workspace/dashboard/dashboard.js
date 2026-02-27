@@ -1110,14 +1110,16 @@ function MarketPage({ token }) {
   const [actionMsg, setActionMsg] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [refreshingId, setRefreshingId] = useState(null);
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [daysFilter, setDaysFilter] = useState(30);
 
   const loadEvents = useCallback(() => {
     setLoading(true);
-    apiFetch('/api/market?days=14', token)
+    apiFetch(`/api/market?days=${daysFilter}&status=${statusFilter}`, token)
       .then(r => r.ok ? r.json() : [])
       .then(data => { setEvents(Array.isArray(data) ? data : []); setLoading(false); })
       .catch(() => setLoading(false));
-  }, [token]);
+  }, [token, daysFilter, statusFilter]);
 
   useEffect(() => { loadEvents(); }, [loadEvents]);
 
@@ -1187,6 +1189,38 @@ function MarketPage({ token }) {
         >
           <Plus size={12} /> Add Event
         </button>
+      </div>
+
+      {/* Status + time filter bar */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        {['all', 'active', 'sold', 'withdrawn'].map(s => (
+          <button key={s}
+            onClick={() => setStatusFilter(s)}
+            style={{
+              padding: '4px 12px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
+              fontFamily: 'var(--font-mono)', letterSpacing: 1, textTransform: 'uppercase',
+              background: statusFilter === s ? 'var(--accent)' : 'var(--bg-card)',
+              color:      statusFilter === s ? '#000' : 'var(--text-muted)',
+              border:     `1px solid ${statusFilter === s ? 'var(--accent)' : 'var(--border)'}`,
+              transition: 'all 0.15s',
+            }}
+          >{s}</button>
+        ))}
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
+          {[14, 30, 90].map(d => (
+            <button key={d}
+              onClick={() => setDaysFilter(d)}
+              style={{
+                padding: '4px 10px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
+                fontFamily: 'var(--font-mono)',
+                background: daysFilter === d ? 'var(--bg-raised)' : 'var(--bg-card)',
+                color:      daysFilter === d ? 'var(--text)' : 'var(--text-muted)',
+                border:     `1px solid ${daysFilter === d ? 'var(--border-light, var(--border))' : 'var(--border)'}`,
+                transition: 'all 0.15s',
+              }}
+            >{d}d</button>
+          ))}
+        </div>
       </div>
 
       {events.length === 0 ? (
