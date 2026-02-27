@@ -2454,7 +2454,7 @@ function HistoryPage({ token }) {
 }
 
 // ── Search Card ────────────────────────────────────────────────────────────
-function SearchCard({ prop, token, onAddedToPlan }) {
+function SearchCard({ prop, token, onAddedToPlan, onDeleted }) {
   const [addState, setAddState]         = useState(null); // null | 'adding' | 'added' | 'already'
   const [showOutcome, setShowOutcome]   = useState(false);
   const [logging, setLogging]           = useState(false);
@@ -2468,6 +2468,7 @@ function SearchCard({ prop, token, onAddedToPlan }) {
   const [history, setHistory]           = useState(null); // null = not yet loaded
   const [showEdit,  setShowEdit]        = useState(false);
   const [showNotes, setShowNotes]       = useState(false);
+  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
 
   const contactId   = prop.crm_contact_id;
   const displayName = prop.crm_name || prop.owner_name || 'Unknown Owner';
@@ -2502,6 +2503,12 @@ function SearchCard({ prop, token, onAddedToPlan }) {
     } catch (err) { console.error('Log failed', err); }
     finally { setLogging(false); }
   }, [contactId, token]);
+
+  const handleDelete = useCallback(async () => {
+    if (!contactId) return;
+    const res = await apiFetch(`/api/contacts/${contactId}`, token, { method: 'DELETE' });
+    if (res.ok) { onDeleted && onDeleted(prop); }
+  }, [contactId, token, onDeleted, prop]);
 
   const copyPhone = useCallback(() => {
     if (!phone) return;
@@ -2675,6 +2682,19 @@ function SearchCard({ prop, token, onAddedToPlan }) {
               <ClipboardList size={10} /> Notes
             </button>
           </>
+        )}
+        {contactId && (
+          deleteConfirmId ? (
+            <>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Delete?</span>
+              <button className="search-action-btn search-action-btn--danger" onClick={handleDelete}>Yes</button>
+              <button className="search-action-btn" onClick={() => setDeleteConfirmId(null)}>No</button>
+            </>
+          ) : (
+            <button className="search-action-btn search-action-btn--danger" onClick={() => setDeleteConfirmId(contactId)} title="Delete contact">
+              <Trash2 size={12} />
+            </button>
+          )
         )}
       </div>
 
@@ -2901,7 +2921,15 @@ function SearchPage({ token }) {
       {!loading && results.length > 0 && (
         <div className="search-results">
           {results.map((prop, i) => (
-            <SearchCard key={prop.property_id || i} prop={prop} token={token} />
+            <SearchCard
+              key={prop.property_id || i}
+              prop={prop}
+              token={token}
+              onDeleted={(deleted) => {
+                setResults(prev => prev.filter(r => (r.crm_contact_id || r.property_id) !== (deleted.crm_contact_id || deleted.property_id)));
+                setTotalCount(prev => prev - 1);
+              }}
+            />
           ))}
         </div>
       )}
@@ -2938,7 +2966,7 @@ function Sidebar({ page, onNav, remainingCount, reminderCount, mobileOpen }) {
     { id: 'market', label: 'Market', Icon: TrendingUp },
     { id: 'buyers', label: 'Buyers', Icon: Users },
     { id: 'reminders', label: 'Reminders', Icon: Bell, badge: reminderCount > 0 ? reminderCount : null },
-    { id: 'search', label: 'Search', Icon: Search },
+    { id: 'contacts', label: 'Contacts', Icon: Users },
     { id: 'history', label: 'History', Icon: History }
   ];
 
@@ -2976,7 +3004,7 @@ function MobileHeader({ page, onMenuClick }) {
     market: 'Market',
     buyers: 'Buyers',
     reminders: 'Reminders',
-    search: 'Search',
+    contacts: 'Contacts',
     history: 'History'
   };
   return (
@@ -3000,7 +3028,7 @@ function BottomTabBar({ page, onNav }) {
   const tabs = [
     { id: 'calls', label: 'Calls', Icon: Phone },
     { id: 'market', label: 'Market', Icon: TrendingUp },
-    { id: 'search', label: 'Search', Icon: Search },
+    { id: 'contacts', label: 'Contacts', Icon: Users },
     { id: 'buyers', label: 'Buyers', Icon: Users },
     { id: 'reminders', label: 'Remind', Icon: Bell },
     { id: 'history', label: 'History', Icon: History }
@@ -3195,7 +3223,7 @@ function App() {
     market: { title: 'Market Events', subtitle: 'RECENT ACTIVITY — 14 DAYS' },
     buyers: { title: 'Buyer Enquiries', subtitle: 'ACTIVE CALL LIST' },
     reminders: { title: 'Reminders', subtitle: 'UPCOMING FOLLOW-UPS' },
-    search: { title: 'Property Search', subtitle: 'CRM + PRICEFINDER — CONTACTS & PROPERTIES' },
+    contacts: { title: 'Contacts', subtitle: 'CRM + PRICEFINDER — CONTACTS & PROPERTIES' },
     history: { title: 'Call History', subtitle: 'TODAY\'S LOGGED OUTCOMES' }
   };
   const pt = pageTitles[page] || pageTitles.calls;
@@ -3206,7 +3234,7 @@ function App() {
       case 'market':    return <MarketPage token={token} />;
       case 'buyers':    return <BuyersPage token={token} />;
       case 'reminders': return <RemindersPage token={token} onReminderCountChange={setReminderCount} />;
-      case 'search':    return <SearchPage token={token} />;
+      case 'contacts':  return <SearchPage token={token} />;
       case 'history':   return <HistoryPage token={token} />;
       default:          return <CallsPage token={token} onReminderCountChange={setReminderCount} />;
     }
