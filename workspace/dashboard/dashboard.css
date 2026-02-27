@@ -2710,8 +2710,8 @@ body::before {
   display: inline-flex; align-items: center;
   opacity: 0.6; transition: opacity 0.15s, color 0.15s;
 }
-.prospect-edit-btn:hover  { opacity: 1; color: #d4a843; }
-.prospect-notes-btn:hover { opacity: 1; color: #d4a843; }
+.prospect-edit-btn:hover  { opacity: 1; color: var(--gold); }
+.prospect-notes-btn:hover { opacity: 1; color: var(--gold); }
 
 /* ── Modal shared ─────────────────────────────────────────────────────── */
 .modal-overlay {
@@ -2729,7 +2729,7 @@ body::before {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 14px 10px; border-bottom: 1px solid #2a2a2a;
 }
-.modal-title  { font-size: 13px; font-weight: 600; color: #d4a843; letter-spacing: 0.04em; }
+.modal-title  { font-size: 13px; font-weight: 600; color: var(--gold); letter-spacing: 0.04em; }
 .modal-close  { background: none; border: none; color: #666; cursor: pointer; padding: 2px; }
 .modal-close:hover { color: #aaa; }
 .modal-body   { padding: 14px; overflow-y: auto; flex: 1; }
@@ -2737,8 +2737,8 @@ body::before {
 .modal-btn    { font-size: 12px; padding: 5px 14px; border-radius: 4px; cursor: pointer; border: none; font-weight: 500; }
 .modal-btn--cancel { background: #2a2a2a; color: #aaa; }
 .modal-btn--cancel:hover { background: #333; }
-.modal-btn--save   { background: #d4a843; color: #111; }
-.modal-btn--save:hover   { background: #e0b54c; }
+.modal-btn--save   { background: var(--gold); color: #111; }
+.modal-btn--save:hover   { background: var(--gold-bright); }
 .modal-btn:disabled { opacity: 0.5; cursor: default; }
 
 /* ── Edit Contact form ────────────────────────────────────────────────── */
@@ -2749,8 +2749,8 @@ body::before {
   width: 100%; background: #111; border: 1px solid #333; border-radius: 4px;
   color: #e0e0e0; font-size: 13px; padding: 6px 8px; box-sizing: border-box;
 }
-.edit-input:focus { outline: none; border-color: #d4a843; }
-.edit-checkbox { width: 16px; height: 16px; accent-color: #d4a843; cursor: pointer; }
+.edit-input:focus { outline: none; border-color: var(--gold); }
+.edit-checkbox { width: 16px; height: 16px; accent-color: var(--gold); cursor: pointer; }
 .edit-error    { color: #f87171; font-size: 12px; margin-top: 6px; }
 
 /* ── Notes Modal ──────────────────────────────────────────────────────── */
@@ -2760,14 +2760,14 @@ body::before {
   color: #e0e0e0; font-size: 13px; padding: 8px; box-sizing: border-box;
   resize: vertical; min-height: 70px;
 }
-.notes-textarea:focus { outline: none; border-color: #d4a843; }
+.notes-textarea:focus { outline: none; border-color: var(--gold); }
 .notes-add-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
 .notes-btn-reminder-toggle {
   background: none; border: 1px solid #333; color: #888; border-radius: 4px;
   font-size: 11px; padding: 4px 8px; cursor: pointer;
   display: inline-flex; align-items: center; gap: 4px;
 }
-.notes-btn-reminder-toggle:hover { color: #d4a843; border-color: #d4a843; }
+.notes-btn-reminder-toggle:hover { color: var(--gold); border-color: var(--gold); }
 
 .notes-reminder-section {
   background: #111; border: 1px solid #2a2a2a; border-radius: 6px;
@@ -2785,17 +2785,17 @@ body::before {
   border: 1px solid #333; background: #1a1a1a; color: #aaa;
   transition: all 0.15s;
 }
-.duration-quick:hover { border-color: #d4a843; color: #d4a843; }
-.duration-quick.active { background: #2a2010; border-color: #d4a843; color: #d4a843; }
+.duration-quick:hover { border-color: var(--gold); color: var(--gold); }
+.duration-quick.active { background: var(--gold-glow); border-color: var(--gold); color: var(--gold); }
 
 /* ── Notes timeline ───────────────────────────────────────────────────── */
 .notes-timeline { margin-top: 4px; }
 .notes-loading, .notes-empty { color: #555; font-size: 12px; text-align: center; padding: 12px 0; }
 .notes-entry { border-left: 2px solid #333; padding: 6px 0 6px 10px; margin-bottom: 10px; }
-.notes-entry--note { border-left-color: #d4a843; }
+.notes-entry--note { border-left-color: var(--gold); }
 .notes-entry--call { border-left-color: #555; }
 .notes-entry-meta  { display: flex; gap: 8px; align-items: center; margin-bottom: 2px; }
 .notes-entry-type  { font-size: 10px; font-weight: 600; color: #888; text-transform: uppercase; letter-spacing: 0.05em; }
-.notes-entry--note .notes-entry-type { color: #d4a843; }
+.notes-entry--note .notes-entry-type { color: var(--gold); }
 .notes-entry-ts    { font-size: 10px; color: #555; }
 .notes-entry-text  { font-size: 12px; color: #ccc; line-height: 1.4; }
