@@ -208,6 +208,57 @@ function StatusStrip({ status, planCount, calledCount }) {
   );
 }
 
+// ── Call Stats Bar ─────────────────────────────────────────────────────────
+function CallStatsBar({ token }) {
+  const [stats, setStats] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await apiFetch('/api/stats/today', token);
+      if (res.ok) setStats(await res.json());
+    } catch (_) {}
+  }, [token]);
+
+  useEffect(() => {
+    load();
+    const iv = setInterval(load, 60000);
+    return () => clearInterval(iv);
+  }, [load]);
+
+  // Expose refresh so ContactCard can call it after logging
+  CallStatsBar.refresh = load;
+
+  if (!stats) return null;
+
+  return (
+    <div className="call-stats-bar">
+      <span className="call-stats-item">
+        <Phone size={10} style={{ color: 'var(--gold)' }} />
+        <strong>{stats.calls}</strong>
+        <span>Calls</span>
+      </span>
+      <span className="call-stats-divider" />
+      <span className="call-stats-item call-stats-item--green">
+        <Check size={10} />
+        <strong>{stats.connected}</strong>
+        <span>Connects</span>
+      </span>
+      <span className="call-stats-divider" />
+      <span className="call-stats-item">
+        <MessageSquare size={10} />
+        <strong>{stats.left_message}</strong>
+        <span>Messages</span>
+      </span>
+      <span className="call-stats-divider" />
+      <span className="call-stats-item call-stats-item--muted">
+        <PhoneOff size={10} />
+        <strong>{stats.no_answer}</strong>
+        <span>No Answer</span>
+      </span>
+    </div>
+  );
+}
+
 // ── Alert Banner ───────────────────────────────────────────────────────────
 function AlertBanner({ alerts }) {
   if (!alerts || alerts.length === 0) return null;
@@ -2814,6 +2865,7 @@ function App() {
       />
       <main className="main-content">
         <MobileHeader page={page} onMenuClick={() => setSidebarOpen(o => !o)} />
+        <CallStatsBar token={token} />
         <div className="page-header">
           <h1 className="page-title">{pt.title}</h1>
           <span className="page-subtitle">{pt.subtitle}</span>

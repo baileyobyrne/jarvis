@@ -419,6 +419,25 @@ app.get('/api/status', (req, res) => {
   }
 });
 
+// ── GET /api/stats/today — call counts for today ─────────────────────────────
+app.get('/api/stats/today', requireAuth, (req, res) => {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const rows = db.prepare(`
+    SELECT outcome, COUNT(*) as n
+    FROM call_log
+    WHERE called_at >= datetime(?, 'localtime')
+    GROUP BY outcome
+  `).all(todayStart.toISOString());
+
+  const counts = { calls: 0, connected: 0, left_message: 0, no_answer: 0, not_interested: 0, callback_requested: 0, appraisal_booked: 0 };
+  rows.forEach(r => {
+    counts.calls += r.n;
+    if (counts[r.outcome] !== undefined) counts[r.outcome] = r.n;
+  });
+  res.json(counts);
+});
+
 // GET /api/contacts/today — returns today's planned contacts, enriched from RP data
 app.get('/api/contacts/today', requireAuth, (req, res) => {
   try {
