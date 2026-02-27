@@ -586,6 +586,157 @@ function EditContactModal({ contact, token, onSaved, onClose }) {
   );
 }
 
+// ── Contact Notes Modal ─────────────────────────────────────────────────────
+const DURATION_OPTIONS = [
+  { label: '15 min', value: 15 },
+  { label: '30 min', value: 30 },
+  { label: '1 hour', value: 60 },
+  { label: '2 hours', value: 120 },
+];
+
+function ContactNotesModal({ contact, token, onClose }) {
+  const [notes,        setNotes]        = useState([]);
+  const [history,      setHistory]      = useState([]);
+  const [noteText,     setNoteText]     = useState('');
+  const [saving,       setSaving]       = useState(false);
+  const [loading,      setLoading]      = useState(true);
+  const [showReminder, setShowReminder] = useState(false);
+  const [remDays,      setRemDays]      = useState(1);
+  const [remNote,      setRemNote]      = useState('');
+  const [remDuration,  setRemDuration]  = useState(30);
+  const [savingRem,    setSavingRem]    = useState(false);
+  const [remSaved,     setRemSaved]     = useState(false);
+
+  useEffect(() => {
+    if (!contact.id) { setLoading(false); return; }
+    Promise.all([
+      apiFetch(`/api/contacts/${contact.id}/notes`, token).then(r => r.json()),
+      apiFetch(`/api/contacts/${contact.id}/history`, token).then(r => r.json()),
+    ]).then(([n, h]) => {
+      setNotes(Array.isArray(n) ? n : []);
+      setHistory(Array.isArray(h) ? h : []);
+    }).catch(() => {}).finally(() => setLoading(false));
+  }, [contact.id, token]);
+
+  const handleSaveNote = useCallback(async () => {
+    if (!noteText.trim()) return;
+    setSaving(true);
+    try {
+      const res = await apiFetch(`/api/contacts/${contact.id}/notes`, token, {
+        method: 'POST', body: JSON.stringify({ note: noteText.trim() })
+      });
+      const data = await res.json();
+      if (data.note) setNotes(prev => [data.note, ...prev]);
+      setNoteText('');
+    } catch (_) {}
+    finally { setSaving(false); }
+  }, [contact.id, noteText, token]);
+
+  const handleSaveReminder = useCallback(async () => {
+    setSavingRem(true);
+    try {
+      const d = new Date();
+      d.setDate(d.getDate() + remDays);
+      d.setHours(9, 0, 0, 0);
+      await apiFetch('/api/reminders', token, {
+        method: 'POST',
+        body: JSON.stringify({
+          contact_id:       contact.id,
+          contact_name:     contact.name,
+          contact_mobile:   contact.mobile,
+          note:             remNote || `Follow up \u2014 ${contact.name}`,
+          fire_at:          d.toISOString(),
+          duration_minutes: remDuration,
+        })
+      });
+      setRemSaved(true);
+      setShowReminder(false);
+    } catch (_) {}
+    finally { setSavingRem(false); }
+  }, [contact, token, remDays, remNote, remDuration]);
+
+  const timeline = [
+    ...notes.map(n   => ({ type: 'note', text: n.note, ts: n.created_at })),
+    ...history.map(h => ({ type: 'call', text: `${OUTCOME_LABELS[h.outcome] || h.outcome}${h.notes ? ' \u2014 ' + h.notes : ''}`, ts: h.called_at })),
+  ].sort((a, b) => new Date(b.ts) - new Date(a.ts));
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box modal-box--notes" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <span className="modal-title">Notes \u2014 {contact.name}</span>
+          <button className="modal-close" onClick={onClose}><X size={14} /></button>
+        </div>
+        <div className="modal-body">
+
+          <div className="notes-add-section">
+            <textarea className="notes-textarea" placeholder="Add a note\u2026"
+              value={noteText} onChange={e => setNoteText(e.target.value)} rows={3} />
+            <div className="notes-add-actions">
+              <button className="notes-btn-reminder-toggle"
+                onClick={() => setShowReminder(v => !v)}>
+                <Bell size={12} /> {showReminder ? 'Hide Reminder' : 'Set Reminder'}
+              </button>
+              <button className="modal-btn modal-btn--save"
+                onClick={handleSaveNote} disabled={saving || !noteText.trim()}>
+                {saving ? 'Saving\u2026' : 'Save Note'}
+              </button>
+            </div>
+          </div>
+
+          {showReminder && (
+            <div className="notes-reminder-section">
+              <div className="followup-label">Follow up in:</div>
+              <div className="followup-row">
+                {[[1,'Tomorrow'],[2,'2 Days'],[7,'1 Week']].map(([days, label]) => (
+                  <button key={days}
+                    className={`followup-quick${remDays === days ? ' active' : ''}`}
+                    onClick={() => setRemDays(days)}>{label}</button>
+                ))}
+              </div>
+              <div className="reminder-duration-row">
+                <span className="reminder-duration-label">Duration:</span>
+                {DURATION_OPTIONS.map(opt => (
+                  <button key={opt.value}
+                    className={`duration-quick${remDuration === opt.value ? ' active' : ''}`}
+                    onClick={() => setRemDuration(opt.value)}>{opt.label}</button>
+                ))}
+              </div>
+              <input className="followup-note-input" type="text"
+                placeholder="Reminder note (optional)\u2026"
+                value={remNote} onChange={e => setRemNote(e.target.value)} />
+              <div className="followup-actions">
+                <button className="followup-skip" onClick={() => setShowReminder(false)}>Cancel</button>
+                <button className="followup-save" onClick={handleSaveReminder} disabled={savingRem}>
+                  {savingRem ? 'Saving\u2026' : 'Save Reminder'}
+                </button>
+              </div>
+              {remSaved && <div className="notes-reminder-saved"><Check size={11} /> Reminder saved</div>}
+            </div>
+          )}
+
+          <div className="notes-timeline">
+            {loading && <div className="notes-loading">Loading\u2026</div>}
+            {!loading && timeline.length === 0 && (
+              <div className="notes-empty">No notes or calls yet.</div>
+            )}
+            {timeline.map((item, i) => (
+              <div key={i} className={`notes-entry notes-entry--${item.type}`}>
+                <div className="notes-entry-meta">
+                  <span className="notes-entry-type">{item.type === 'note' ? '\uD83D\uDCDD Note' : '\uD83D\uDCDE Call'}</span>
+                  <span className="notes-entry-ts">{fmtDate(item.ts)} {fmtTime(item.ts)}</span>
+                </div>
+                <div className="notes-entry-text">{item.text}</div>
+              </div>
+            ))}
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Prospect Card (Just Sold / Just Listed contacts) ───────────────────────
 function ProspectCard({ contact, onLogged, token, eventType, eventAddress }) {
   const [localOutcome, setLocalOutcome] = useState(contact.outcome || null);
