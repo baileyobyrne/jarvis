@@ -1,4 +1,4 @@
-require('dotenv').config({ path: '/root/.openclaw/.env' });
+require('dotenv').config({ path: '/root/.openclaw/.env', override: true });
 const express = require('express');
 const fs      = require('fs');
 const path    = require('path');
@@ -1126,6 +1126,111 @@ app.post('/api/contacts/:id/notes', requireAuth, async (req, res) => {
     res.json({ ok: true, notes_summary });
   } catch (e) {
     console.error('[POST /api/contacts/:id/notes]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/chat — Jarvis AI assistant
+app.post('/api/chat', requireAuth, async (req, res) => {
+  try {
+    const { messages } = req.body;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages array required' });
+    }
+
+    // ── Build live farm context from DB ──────────────────────────────────
+    const recentEvents = db.prepare(`
+      SELECT type, address, price, confirmed_price, status, beds, property_type,
+             agent_name, event_date, days_on_market
+      FROM market_events
+      WHERE detected_at >= datetime('now', '-30 days')
+      ORDER BY detected_at DESC LIMIT 20
+    `).all();
+
+    const farmStats = db.prepare(`
+      SELECT
+        COUNT(*) AS total_contacts,
+        SUM(CASE WHEN propensity_score >= 45 THEN 1 ELSE 0 END) AS prime_contacts,
+        SUM(CASE WHEN propensity_score >= 20 AND propensity_score < 45 THEN 1 ELSE 0 END) AS warm_contacts
+      FROM contacts
+    `).get();
+
+    const recentSolds = db.prepare(`
+      SELECT address, COALESCE(confirmed_price, price) AS sale_price, beds, property_type, days_on_market, event_date
+      FROM market_events WHERE type = 'sold'
+      ORDER BY detected_at DESC LIMIT 10
+    `).all();
+
+    const eventsText = recentEvents.map(e =>
+      `- ${(e.type || '').toUpperCase()}: ${e.address} | ${e.beds ? e.beds + 'bd ' : ''}${e.property_type || ''} | Price: ${e.confirmed_price || e.price || 'not disclosed'} | Status: ${e.status || 'active'} | Date: ${e.event_date || 'recent'}`
+    ).join('\n') || 'None';
+
+    const soldsText = recentSolds.map(e =>
+      `- ${e.address}: ${e.sale_price || 'price withheld'} | ${e.beds ? e.beds + 'bd ' : ''}${e.property_type || ''} | DOM: ${e.days_on_market || '?'}`
+    ).join('\n') || 'None';
+
+    const today = new Date().toLocaleDateString('en-AU', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
+    const systemPrompt = `You are Jarvis, an AI assistant for Bailey O'Byrne, a real estate agent at McGrath Willoughby in Sydney's lower north shore. Today is ${today}.
+
+FARM AREA: Willoughby, North Willoughby, Willoughby East, Castlecrag, Middle Cove, Naremburn, Chatswood, Artarmon.
+
+DATABASE STATS:
+- Total contacts: ${farmStats?.total_contacts || 0}
+- Prime (score \u226545): ${farmStats?.prime_contacts || 0}
+- Warm (score 20-44): ${farmStats?.warm_contacts || 0}
+
+RECENT MARKET ACTIVITY (last 30 days):
+${eventsText}
+
+RECENT SOLD RESULTS:
+${soldsText}
+
+CAPABILITIES:
+- Answer questions about market conditions, comparable sales, property values
+- Suggest talking points for prospecting calls near recent sales/listings
+- To update a sale price, include UPDATE_PRICE:{event_id}:{price} on its own line
+- Help analyse which contacts to prioritise
+
+Be concise, direct, and use your knowledge of the Willoughby property market. Use Australian English. Prices in AUD. When unsure, say so.`;
+
+    const apiRes = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model:      'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        system:     systemPrompt,
+        messages:   messages.map(m => ({ role: m.role, content: m.content })),
+      },
+      {
+        headers: {
+          'x-api-key':         process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type':      'application/json',
+        },
+        timeout: 30000,
+      }
+    );
+
+    let reply = apiRes.data.content[0].text;
+
+    // ── Handle inline tool call: UPDATE_PRICE:{id}:{price} ───────────────
+    const updateMatch = reply.match(/UPDATE_PRICE:(\d+):([^\n]+)/);
+    if (updateMatch) {
+      const eventId  = parseInt(updateMatch[1]);
+      const newPrice = updateMatch[2].trim();
+      const existing = db.prepare('SELECT id FROM market_events WHERE id = ?').get(eventId);
+      if (existing) {
+        db.prepare('UPDATE market_events SET confirmed_price = ?, status = ? WHERE id = ?')
+          .run(newPrice, 'sold', eventId);
+        reply = reply.replace(/UPDATE_PRICE:\d+:[^\n]+\n?/, '').trim();
+        return res.json({ reply, action: { type: 'price_updated', event_id: eventId, price: newPrice } });
+      }
+    }
+
+    res.json({ reply });
+  } catch (e) {
+    console.error('[POST /api/chat]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
