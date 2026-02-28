@@ -531,6 +531,78 @@ async function notifyBuyerMatches(matches, eventAddress, marketEventId) {
   sendTelegramMessage(msg).catch(e => console.warn('[buyer-match] Telegram failed:', e.message));
 }
 
+// Automation 2: check active buyer *referrals* against a market event suburb and notify
+async function notifyReferralBuyerMatches(event) {
+  try {
+    const eventSuburb = (event.suburb || '').toUpperCase().trim();
+    if (!eventSuburb) return;
+
+    const activeReferrals = db.prepare(
+      "SELECT r.*, c.name AS contact_name, c.mobile AS contact_mobile, p.name AS partner_name " +
+      "FROM referrals r " +
+      "LEFT JOIN contacts c ON c.id = r.contact_id " +
+      "LEFT JOIN partners p ON p.id = r.partner_id " +
+      "WHERE r.type = 'buyer' AND r.status IN ('referred','introduced','active')"
+    ).all();
+
+    if (activeReferrals.length === 0) return;
+
+    const priceNum = parsePriceToInt(event.price || event.confirmed_price);
+    const eventAddr = (event.address || '').trim();
+    const eventType = (event.property_type || event.type || '').toLowerCase();
+    const eventBeds = event.beds ? parseInt(event.beds) : null;
+
+    for (const ref of activeReferrals) {
+      let brief = {};
+      try { brief = JSON.parse(ref.buyer_brief || '{}'); } catch (_) { continue; }
+
+      // suburbs can be a JSON array or a comma-sep string or brief.suburbs_wanted
+      let suburbs = [];
+      if (Array.isArray(brief.suburbs)) {
+        suburbs = brief.suburbs;
+      } else if (typeof brief.suburbs === 'string') {
+        suburbs = brief.suburbs.split(',').map(s => s.trim()).filter(Boolean);
+      } else if (typeof brief.suburbs_wanted === 'string') {
+        suburbs = brief.suburbs_wanted.split(',').map(s => s.trim()).filter(Boolean);
+      } else if (Array.isArray(brief.suburbs_wanted)) {
+        suburbs = brief.suburbs_wanted;
+      }
+      if (suburbs.length === 0) continue;
+
+      const suburbsUpper = suburbs.map(s => s.toUpperCase().trim());
+      const matched = suburbsUpper.some(s => eventSuburb.includes(s) || s.includes(eventSuburb));
+      if (!matched) continue;
+
+      // Build match message
+      const priceStr  = priceNum ? `$${(priceNum/1e6).toFixed(2).replace(/\.?0+$/, '')}M` : null;
+      const budgetMin = brief.budget_min ? `$${(brief.budget_min/1e6).toFixed(1)}M` : null;
+      const budgetMax = brief.budget_max ? `$${(brief.budget_max/1e6).toFixed(1)}M` : null;
+      const budgetStr = budgetMin && budgetMax ? `${budgetMin}–${budgetMax}` : budgetMin || budgetMax || null;
+      const bedsStr   = eventBeds ? `${eventBeds}` : null;
+      const bathsStr  = event.baths ? `${event.baths}` : null;
+
+      let matchedSuburb = suburbsUpper.find(s => eventSuburb.includes(s) || s.includes(eventSuburb)) || eventSuburb;
+
+      let msg = `🎯 BUYER MATCH ALERT\n\nProperty: ${eventAddr}`;
+      const detailParts = [];
+      if (eventType) detailParts.push(`Type: ${eventType}`);
+      if (priceStr) detailParts.push(`Price: ${priceStr.replace('M', ',000,000').replace('$', '$').replace(/\.\d+,/, ',')}`);
+      if (detailParts.length) msg += `\n${detailParts.join(' | ')}`;
+      const specParts = [];
+      if (bedsStr) specParts.push(`Beds: ${bedsStr}`);
+      if (bathsStr) specParts.push(`Baths: ${bathsStr}`);
+      if (specParts.length) msg += `\n${specParts.join(' | ')}`;
+      msg += `\n\nMatches buyer brief for:\n👤 ${ref.contact_name || 'Unknown'} → ${ref.partner_name || 'Unknown'}`;
+      if (budgetStr) msg += `\n💰 ${budgetStr} budget · ${matchedSuburb} ✓`;
+      if (ref.contact_mobile) msg += `\n📞 ${ref.contact_mobile}`;
+
+      sendTelegramMessage(msg).catch(e => console.warn('[referral-buyer-match] Telegram failed:', e.message));
+    }
+  } catch (e) {
+    console.warn('[referral-buyer-match] failed:', e.message);
+  }
+}
+
 // ─── Auth middleware ───────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
   const auth = req.headers['authorization'] || '';
@@ -2363,6 +2435,8 @@ app.post('/api/market-events/manual', requireAuth, async (req, res) => {
         const matches = findMatchingBuyers({ address: normAddress, suburb: detectedSuburb || '', type, beds, baths, cars, property_type, price, id: newEventId });
         if (matches.length > 0) await notifyBuyerMatches(matches, normAddress, newEventId);
       } catch (e) { console.warn('[buyer-match] manual event match failed:', e.message); }
+      // Also check active buyer referrals against this event's suburb
+      await notifyReferralBuyerMatches({ address: normAddress, suburb: detectedSuburb || '', type, beds, baths, cars, property_type, price });
     });
   } catch (e) {
     console.error('[POST /api/market-events/manual]', e.message);
@@ -2483,6 +2557,12 @@ app.patch('/api/market-events/:id', requireAuth, async (req, res) => {
           const matches = findMatchingBuyers({ address: normAddress, suburb: newSuburb || '', type: newType, beds: effectiveBeds, baths: effectiveBaths, cars: effectiveCars, property_type: effectivePt, price: effectivePrice, id });
           if (matches.length > 0) await notifyBuyerMatches(matches, normAddress, id);
         } catch (e) { console.warn('[buyer-match] patch event match failed:', e.message); }
+        // Also check active buyer referrals
+        const effectivePt2  = property_type !== undefined ? property_type : existing.property_type;
+        const effectivePrice2 = price !== undefined ? price : existing.price;
+        const effectiveBeds2  = beds !== undefined ? beds : existing.beds;
+        const effectiveBaths2 = baths !== undefined ? baths : existing.baths;
+        await notifyReferralBuyerMatches({ address: normAddress, suburb: newSuburb || '', type: newType, beds: effectiveBeds2, baths: effectiveBaths2, property_type: effectivePt2, price: effectivePrice2 });
       });
     }
   } catch (e) {
@@ -3349,7 +3429,57 @@ app.post('/api/referrals', requireAuth, (req, res) => {
       disclosure_sent ? 1 : 0
     );
     const referral = db.prepare('SELECT * FROM referrals WHERE id = ?').get(result.lastInsertRowid);
+    // Fetch contact + partner names for notification
+    const refContact = db.prepare('SELECT name, mobile, address FROM contacts WHERE id = ?').get(String(contact_id));
+    const refPartner  = db.prepare('SELECT name, type FROM partners WHERE id = ?').get(parseInt(partner_id));
     res.status(201).json({ ok: true, referral });
+
+    // Automation 1: fire-and-forget Telegram notification on referral creation
+    setImmediate(async () => {
+      try {
+        const cName    = refContact?.name    || 'Unknown';
+        const cAddr    = refContact?.address || '';
+        const pName    = refPartner?.name    || 'Unknown';
+        const pType    = refPartner?.type    || '';
+        const feeStr   = expected_fee ? `$${Number(expected_fee).toLocaleString()}` : null;
+
+        let msg = '';
+        if (type === 'buyer') {
+          let brief = {};
+          try { brief = JSON.parse(buyer_brief || '{}'); } catch (_) {}
+          const budgetMin = brief.budget_min ? `$${(brief.budget_min/1e6).toFixed(1)}M` : null;
+          const budgetMax = brief.budget_max ? `$${(brief.budget_max/1e6).toFixed(1)}M` : null;
+          const budgetStr = budgetMin && budgetMax ? `${budgetMin}–${budgetMax}` : budgetMin || budgetMax || null;
+          const suburbsStr = Array.isArray(brief.suburbs) ? brief.suburbs.join(', ') : (brief.suburbs_wanted || '');
+          const tfStr = brief.timeframe || '';
+          const preApproved = brief.pre_approved;
+          msg = `🎯 New Buyer Referral\n\n👤 ${cName}`;
+          if (cAddr) msg += `\n📍 ${cAddr}`;
+          if (budgetStr) msg += `\n💰 Budget: ${budgetStr}`;
+          if (suburbsStr) msg += `\n🏡 ${suburbsStr}`;
+          if (tfStr) msg += `\n⏱️ Timeframe: ${tfStr}`;
+          if (preApproved) msg += `\n✅ Pre-approved`;
+          msg += `\n\n→ Partner: ${pName}${pType ? ` (${pType})` : ''}`;
+          if (feeStr) msg += `\n→ Expected fee: ${feeStr}`;
+        } else if (type === 'vendor') {
+          msg = `🏆 New Vendor Referral\n\n👤 ${cName}`;
+          if (cAddr) msg += `\n📍 ${cAddr}`;
+          msg += `\n→ Partner: ${pName}${pType ? ` (${pType})` : ''}`;
+          if (feeStr) {
+            // Include fee with 20% note if it looks like a commission
+            msg += `\n→ Expected fee: ~${feeStr}`;
+          }
+        } else if (type === 'finance') {
+          msg = `💼 New Finance Referral\n\n👤 ${cName}`;
+          if (cAddr) msg += `\n📍 ${cAddr}`;
+          msg += `\n→ Partner: ${pName}${pType ? ` (${pType})` : ''}`;
+          if (feeStr) msg += `\n→ Expected fee: ${feeStr}`;
+        }
+        if (msg) await sendTelegramMessage(msg);
+      } catch (e) {
+        console.warn('[referral-notify] Telegram failed:', e.message);
+      }
+    });
   } catch (e) {
     console.error('[POST /api/referrals]', e.message);
     res.status(500).json({ error: e.message });
@@ -3401,6 +3531,52 @@ app.put('/api/referrals/:id', requireAuth, (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ─── Automation 3: Daily stale referral digest — Mon–Fri 8:30am AEDT (22:30 UTC prev day) ──
+// AEDT = UTC+11 in summer / UTC+10 in winter. Cron target: 30 22 * * 1-5 UTC (= 8:30am AEDT)
+// Implementation: poll every minute, fire once per day when UTC time matches.
+let _staleDigestLastFired = null; // tracks date string (YYYY-MM-DD) of last fire
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const utcDay  = now.getUTCDay();   // 0=Sun, 1=Mon...5=Fri, 6=Sat
+    const utcHour = now.getUTCHours();
+    const utcMin  = now.getUTCMinutes();
+    const todayKey = now.toISOString().slice(0, 10); // YYYY-MM-DD
+
+    // Fire Mon–Fri at 22:30 UTC (= 8:30am AEDT)
+    if (utcDay >= 1 && utcDay <= 5 && utcHour === 22 && utcMin === 30 && _staleDigestLastFired !== todayKey) {
+      _staleDigestLastFired = todayKey;
+      const staleReferrals = db.prepare(`
+        SELECT r.*, c.name AS contact_name, p.name AS partner_name
+        FROM referrals r
+        LEFT JOIN contacts c ON c.id = r.contact_id
+        LEFT JOIN partners p ON p.id = r.partner_id
+        WHERE r.status IN ('referred', 'introduced', 'active')
+          AND r.referred_at < datetime('now', '-7 days')
+        ORDER BY r.referred_at ASC
+      `).all();
+
+      if (staleReferrals.length === 0) {
+        console.log('[stale-digest] No stale referrals — skipping Telegram');
+        return;
+      }
+
+      const lines = staleReferrals.map(r => {
+        const typeLabel = r.type.charAt(0).toUpperCase() + r.type.slice(1);
+        const refDate = new Date(r.referred_at + (r.referred_at.includes('T') ? '' : 'T00:00:00Z'));
+        const ageDays = Math.floor((Date.now() - refDate.getTime()) / 86400000);
+        return `• ${r.contact_name || 'Unknown'} (${typeLabel} → ${r.partner_name || 'Unknown'}) — ${ageDays} days`;
+      });
+
+      const msg = `⚠️ STALE REFERRAL DIGEST\n\n${staleReferrals.length} referral${staleReferrals.length > 1 ? 's' : ''} need follow-up:\n\n${lines.join('\n')}`;
+      await sendTelegramMessage(msg);
+      console.log(`[stale-digest] Sent digest for ${staleReferrals.length} stale referrals`);
+    }
+  } catch (e) {
+    console.warn('[stale-digest] Error:', e.message);
+  }
+}, 60 * 1000); // check every minute
 
 // ─── Static dashboard (catches all unmatched routes — must be last) ───────────
 app.use(express.static(DASHBOARD_DIR));
