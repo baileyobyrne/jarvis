@@ -804,6 +804,7 @@ function ContactCard({ contact, token, onLogged, context, eventAddress, autoExpa
       {showReferModal && (
         <ReferModal
           contact={localContact}
+          token={token}
           onClose={() => setShowReferModal(false)}
           onSuccess={() => setShowReferModal(false)}
         />
@@ -1150,7 +1151,7 @@ function ContactNotesModal({ contact, token, onClose, prefilledNote = '' }) {
 // ProspectCard removed — unified ContactCard above handles all contexts
 
 // ── Refer Modal ─────────────────────────────────────────────────────────────
-function ReferModal({ contact, onClose, onSuccess }) {
+function ReferModal({ contact, token, onClose, onSuccess }) {
   const [partners, setPartners] = React.useState([]);
   const [partnerId, setPartnerId] = React.useState('');
   const [type, setType] = React.useState('');
@@ -1166,7 +1167,7 @@ function ReferModal({ contact, onClose, onSuccess }) {
   const [polishedBrief, setPolishedBrief] = React.useState('');
 
   React.useEffect(() => {
-    apiFetch('/api/partners').then(r => r.json()).then(data => {
+    apiFetch('/api/partners', token).then(r => r.json()).then(data => {
       setPartners(data);
       if (data.length) setPartnerId(String(data[0].id));
     }).catch(() => {});
@@ -1174,7 +1175,7 @@ function ReferModal({ contact, onClose, onSuccess }) {
     if (cc.includes('vendor')) setType('vendor');
     else if (cc.includes('buyer')) setType('buyer');
     else setType('finance');
-    apiFetch(`/api/buyer-profiles?contact_id=${contact.id}`).then(r => r.json()).then(profiles => {
+    apiFetch(`/api/buyer-profiles?contact_id=${contact.id}`, token).then(r => r.json()).then(profiles => {
       if (Array.isArray(profiles) && profiles.length) {
         const p = profiles[0];
         setBuyerBrief(prev => ({
@@ -1183,7 +1184,8 @@ function ReferModal({ contact, onClose, onSuccess }) {
           budget_max: p.price_max || '',
           suburbs: p.suburbs_wanted || '',
           property_type: p.property_type || '',
-          timeframe: p.timeframe || ''
+          timeframe: p.timeframe || '',
+          pre_approved: p.pre_approved || ''
         }));
       }
     }).catch(() => {});
@@ -1203,7 +1205,7 @@ function ReferModal({ contact, onClose, onSuccess }) {
   async function handlePolishBrief() {
     setPolishingBrief(true);
     try {
-      const res = await apiFetch('/api/referrals/polish-brief', {
+      const res = await apiFetch('/api/referrals/polish-brief', token, {
         method: 'POST',
         body: JSON.stringify({ ...buyerBrief, raw_notes: notes })
       });
@@ -1220,8 +1222,8 @@ function ReferModal({ contact, onClose, onSuccess }) {
     setSaving(true);
     setError('');
     const feeVal = partner && partner.fee_type === 'flat' ? partner.fee_value : null;
-    const briefPayload = type === 'buyer' ? JSON.stringify({ ...buyerBrief, ai_brief: polishedBrief || undefined }) : null;
-    const res = await apiFetch('/api/referrals', {
+    const briefPayload = type === 'buyer' ? { ...buyerBrief, ai_brief: polishedBrief || undefined } : null;
+    const res = await apiFetch('/api/referrals', token, {
       method: 'POST',
       body: JSON.stringify({
         contact_id: contact.id,
