@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add a referral pipeline to Jarvis — track partner agents/brokers, log referrals from the call board, and monitor expected vs received revenue.
+**Goal:** Add a referral pipeline to Jarvis — track partner agents/brokers, log referrals from the call board, and monitor expected vs received revenue. Strong emphasis on buyers agent referrals (53k buyer contacts in CRM, $2k–$5k per settled referral).
 
-**Architecture:** New `partners` and `referrals` tables in SQLite via `lib/db.js`. CRUD API endpoints in `snapshot-server.js`. Dashboard gains a "Refer" action on ContactCard, a new REFERRALS page with pipeline view, and a Partners management section.
+**Architecture:** New `partners`, `referrals`, and `agentbox_contacts` tables in SQLite via `lib/db.js`. CRUD API endpoints in `snapshot-server.js`. Dashboard gains a "Refer" action on ContactCard (with buyer brief capture for buyer-type referrals), a new REFERRALS pipeline page, a Partners management section, and a Referral Prospecting page querying the full 124k McGrath CRM.
 
 **Tech Stack:** better-sqlite3, Express, React (Babel JSX, no build), CSS tokens from dashboard.css. All IDs: `INTEGER PRIMARY KEY AUTOINCREMENT`. Auth: Bearer token (`DASHBOARD_PASSWORD`).
 
@@ -692,19 +692,487 @@ git commit -m "feat: add Referrals nav item, wire routing, bump PWA cache to v4"
 
 ---
 
-### Task 7: End-to-End Smoke Test
+### Task 7: Buyer Brief in ReferModal + Pipeline Card
 
-**Full flow:**
+**Files:**
+- Modify: `/root/.openclaw/workspace/dashboard/dashboard.js`
 
-1. Go to REFERRALS page → Manage Partners → add a selling agent partner (e.g. "Jane Smith", selling_agent, 20%, suburb: Chatswood)
-2. Go to Circle Prospecting call board → open any contact → click "Refer"
-3. Modal shows: Jane Smith selected, type pre-suggested, fee shown
-4. Tick disclosure checkbox → click Confirm Referral
-5. Go back to REFERRALS page → contact appears in "Referred" column with expected fee
-6. Change status dropdown to "Introduced" → card moves column
-7. Check Active Pipeline total updated
+**Step 1: Expand ReferModal with buyer brief fields**
 
-If all steps pass, the feature is complete.
+Inside `ReferModal`, after the referral type selector, add a conditional section that appears when `type === 'buyer'`:
+
+```jsx
+{type === 'buyer' && (
+  <div style={{padding:'10px',background:'rgba(59,130,246,0.08)',border:'1px solid rgba(59,130,246,0.3)',borderRadius:'4px',marginBottom:'12px'}}>
+    <div style={{color:'#3b82f6',fontSize:'11px',fontWeight:'600',letterSpacing:'0.08em',marginBottom:'10px'}}>BUYER BRIEF — required for buyers agent referral</div>
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px',marginBottom:'8px'}}>
+      <div>
+        <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',marginBottom:'3px'}}>BUDGET MIN</label>
+        <input type="number" value={buyerBrief.budget_min} onChange={e => setBuyerBrief({...buyerBrief,budget_min:e.target.value})}
+          placeholder="e.g. 1500000"
+          style={{width:'100%',boxSizing:'border-box',background:'var(--bg-raised)',border:'1px solid var(--border-subtle)',color:'var(--text-primary)',padding:'7px',borderRadius:'4px',fontSize:'12px'}} />
+      </div>
+      <div>
+        <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',marginBottom:'3px'}}>BUDGET MAX</label>
+        <input type="number" value={buyerBrief.budget_max} onChange={e => setBuyerBrief({...buyerBrief,budget_max:e.target.value})}
+          placeholder="e.g. 2200000"
+          style={{width:'100%',boxSizing:'border-box',background:'var(--bg-raised)',border:'1px solid var(--border-subtle)',color:'var(--text-primary)',padding:'7px',borderRadius:'4px',fontSize:'12px'}} />
+      </div>
+    </div>
+    <div style={{marginBottom:'8px'}}>
+      <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',marginBottom:'3px'}}>TARGET SUBURBS</label>
+      <input value={buyerBrief.suburbs} onChange={e => setBuyerBrief({...buyerBrief,suburbs:e.target.value})}
+        placeholder="e.g. Mosman, Cremorne, Neutral Bay"
+        style={{width:'100%',boxSizing:'border-box',background:'var(--bg-raised)',border:'1px solid var(--border-subtle)',color:'var(--text-primary)',padding:'7px',borderRadius:'4px',fontSize:'12px'}} />
+    </div>
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px'}}>
+      <div>
+        <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',marginBottom:'3px'}}>PROPERTY TYPE</label>
+        <select value={buyerBrief.property_type} onChange={e => setBuyerBrief({...buyerBrief,property_type:e.target.value})}
+          style={{width:'100%',background:'var(--bg-raised)',border:'1px solid var(--border-subtle)',color:'var(--text-primary)',padding:'7px',borderRadius:'4px',fontSize:'12px'}}>
+          <option value="">Any</option>
+          <option value="house">House</option>
+          <option value="unit">Unit</option>
+          <option value="townhouse">Townhouse</option>
+        </select>
+      </div>
+      <div>
+        <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',marginBottom:'3px'}}>TIMEFRAME</label>
+        <select value={buyerBrief.timeframe} onChange={e => setBuyerBrief({...buyerBrief,timeframe:e.target.value})}
+          style={{width:'100%',background:'var(--bg-raised)',border:'1px solid var(--border-subtle)',color:'var(--text-primary)',padding:'7px',borderRadius:'4px',fontSize:'12px'}}>
+          <option value="">Unknown</option>
+          <option value="asap">ASAP</option>
+          <option value="1-3 months">1–3 months</option>
+          <option value="3-6 months">3–6 months</option>
+          <option value="6+ months">6+ months</option>
+        </select>
+      </div>
+      <div>
+        <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',marginBottom:'3px'}}>PRE-APPROVED?</label>
+        <select value={buyerBrief.pre_approved} onChange={e => setBuyerBrief({...buyerBrief,pre_approved:e.target.value})}
+          style={{width:'100%',background:'var(--bg-raised)',border:'1px solid var(--border-subtle)',color:'var(--text-primary)',padding:'7px',borderRadius:'4px',fontSize:'12px'}}>
+          <option value="">Unknown</option>
+          <option value="yes">Yes</option>
+          <option value="no">No</option>
+        </select>
+      </div>
+    </div>
+  </div>
+)}
+```
+
+Add state in ReferModal:
+```jsx
+const [buyerBrief, setBuyerBrief] = React.useState({ budget_min:'', budget_max:'', suburbs:'', property_type:'', timeframe:'', pre_approved:'' });
+```
+
+In `useEffect`, if the contact has a `buyer_profile`, pre-populate:
+```jsx
+// After fetching partners, check for existing buyer profile
+apiFetch(`/api/buyer-profiles?contact_id=${contact.id}`).then(r => r.json()).then(profiles => {
+  if (profiles && profiles.length) {
+    const p = profiles[0];
+    setBuyerBrief({
+      budget_min: p.price_min || '',
+      budget_max: p.price_max || '',
+      suburbs: p.suburbs_wanted || '',
+      property_type: p.property_type || '',
+      timeframe: p.timeframe || '',
+      pre_approved: ''
+    });
+  }
+});
+```
+
+In `handleSubmit`, include buyer_brief when type === 'buyer':
+```jsx
+const payload = {
+  contact_id: contact.id,
+  partner_id: parseInt(partnerId),
+  type,
+  expected_fee: feeVal,
+  disclosure_sent: true,
+  notes,
+  buyer_brief: type === 'buyer' ? JSON.stringify(buyerBrief) : null
+};
+```
+
+**Step 2: Show buyer brief on pipeline cards**
+
+In `ReferralsPage`, for buyer referral cards, parse and show the brief under the contact address:
+
+```jsx
+{r.type === 'buyer' && r.buyer_brief && (() => {
+  try {
+    const b = JSON.parse(r.buyer_brief);
+    const budget = b.budget_min && b.budget_max
+      ? `$${(b.budget_min/1e6).toFixed(1)}M–$${(b.budget_max/1e6).toFixed(1)}M`
+      : '';
+    return (
+      <div style={{fontSize:'10px',color:'#3b82f6',marginBottom:'4px',lineHeight:'1.4'}}>
+        {budget && <span>{budget} · </span>}
+        {b.suburbs && <span>{b.suburbs} · </span>}
+        {b.pre_approved === 'yes' && <span style={{color:'#22c55e'}}>Pre-approved ✓</span>}
+        {b.timeframe && <span> · {b.timeframe}</span>}
+      </div>
+    );
+  } catch { return null; }
+})()}
+```
+
+**Step 3: Test buyer referral flow**
+
+1. Add a buyers agent partner (e.g. "Sydney Buyer's Agency", buyers_agent, flat $3500)
+2. Open a contact with "Buyer" in their contact_class
+3. Click Refer → type auto-suggests "buyer" → blue brief section appears
+4. Fill in budget, suburbs, tick pre-approved, set timeframe
+5. Tick disclosure → submit
+6. Go to REFERRALS page → card shows budget range + suburbs + pre-approved ✓ in blue
+
+**Step 4: Commit**
+
+```bash
+cd /root/.openclaw
+git add workspace/dashboard/dashboard.js
+git commit -m "feat: add buyer brief capture to ReferModal and pipeline card display"
+```
+
+---
+
+### Task 8: Import 124k AgentBox Contacts to SQLite
+
+**Files:**
+- Create: `/root/.openclaw/scripts/import-agentbox-contacts.js`
+- Modify: `/root/.openclaw/lib/db.js` (add `agentbox_contacts` table migration)
+
+**Step 1: Add table migration to db.js**
+
+Add after the referrals migration block:
+
+```js
+// Schema migrations — agentbox_contacts table (full McGrath Love Local CRM)
+if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='agentbox_contacts'").get()) {
+  db.prepare(`CREATE TABLE IF NOT EXISTS agentbox_contacts (
+    id           TEXT PRIMARY KEY,
+    name         TEXT,
+    mobile       TEXT,
+    email        TEXT,
+    address      TEXT,
+    suburb       TEXT,
+    state        TEXT,
+    postcode     TEXT,
+    contact_class TEXT,
+    do_not_call  TEXT,
+    last_modified TEXT
+  )`).run();
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_agentbox_suburb ON agentbox_contacts(suburb)').run();
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_agentbox_class ON agentbox_contacts(contact_class)').run();
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_agentbox_mobile ON agentbox_contacts(mobile)').run();
+  console.log('[db] agentbox_contacts table created');
+}
+```
+
+**Step 2: Write the import script**
+
+```js
+// scripts/import-agentbox-contacts.js
+require('/root/.openclaw/skills/agentbox-willoughby/node_modules/dotenv').config({ path: '/root/.openclaw/.env' });
+const fs = require('fs');
+const Database = require('/root/.openclaw/node_modules/better-sqlite3');
+
+const db = new Database('/root/.openclaw/workspace/jarvis.db');
+const raw = fs.readFileSync('/root/.openclaw/workspace/willoughby-contacts.json', 'utf8');
+const data = JSON.parse(raw);
+const contacts = data.contacts;
+const total = Object.keys(contacts).length;
+
+console.log(`Importing ${total} contacts...`);
+
+const insert = db.prepare(`
+  INSERT OR REPLACE INTO agentbox_contacts
+  (id, name, mobile, email, address, suburb, state, postcode, contact_class, do_not_call, last_modified)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+const importAll = db.transaction(() => {
+  let count = 0;
+  for (let i = 0; i < total; i++) {
+    const c = contacts[String(i)];
+    if (!c || !c.id) continue;
+    insert.run(
+      String(c.id),
+      c.name || null,
+      c.mobile || null,
+      c.email || null,
+      c.address || null,
+      c.suburb || null,
+      c.state || null,
+      c.postcode || null,
+      c.contactClass || null,
+      c.doNotCall || null,
+      c.lastModified || null
+    );
+    count++;
+    if (count % 10000 === 0) console.log(`  ${count}/${total}...`);
+  }
+  return count;
+});
+
+const count = importAll();
+console.log(`Done — ${count} contacts imported.`);
+
+// Verify
+const stats = db.prepare(`
+  SELECT
+    COUNT(*) as total,
+    COUNT(mobile) as with_mobile,
+    COUNT(CASE WHEN do_not_call != 'YES' OR do_not_call IS NULL THEN 1 END) as callable
+  FROM agentbox_contacts
+`).get();
+console.log('Stats:', stats);
+db.close();
+```
+
+**Step 3: Run the import**
+
+```bash
+pm2 restart jarvis-snapshot --update-env && sleep 2
+node /root/.openclaw/scripts/import-agentbox-contacts.js
+```
+
+Expected:
+```
+Importing 124000 contacts...
+  10000/124000...
+  20000/124000...
+  ...
+Done — 124000 contacts imported.
+Stats: { total: 124000, with_mobile: 93063, callable: ... }
+```
+
+**Step 4: Verify via sqlite3**
+
+```bash
+sqlite3 /root/.openclaw/workspace/jarvis.db "
+  SELECT suburb, COUNT(*) as n
+  FROM agentbox_contacts
+  WHERE (contact_class LIKE '%Buyer%' OR contact_class LIKE '%Vendor%')
+    AND mobile IS NOT NULL
+  GROUP BY suburb
+  ORDER BY n DESC
+  LIMIT 15;
+"
+```
+
+**Step 5: Commit**
+
+```bash
+cd /root/.openclaw
+git add lib/db.js scripts/import-agentbox-contacts.js
+git commit -m "feat: import 124k agentbox contacts to SQLite for referral prospecting"
+```
+
+---
+
+### Task 9: Referral Prospecting Page
+
+**Files:**
+- Modify: `/root/.openclaw/snapshot-server.js` (new search endpoint)
+- Modify: `/root/.openclaw/workspace/dashboard/dashboard.js` (new page component)
+
+**Step 1: Add API endpoint**
+
+```js
+// GET /api/referral-prospects?suburb=Mosman&type=buyer&page=1
+app.get('/api/referral-prospects', auth, (req, res) => {
+  const VALID_TYPES = ['buyer', 'vendor', 'all'];
+  const type = VALID_TYPES.includes(req.query.type) ? req.query.type : 'buyer';
+  const suburb = req.query.suburb ? req.query.suburb.trim() : null;
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = 50;
+  const offset = (page - 1) * limit;
+
+  // Exclude contacts already in our local patch
+  const PATCH_SUBURBS = ['Willoughby','North Willoughby','Willoughby East','Castlecrag','Middle Cove'];
+
+  const conditions = [`suburb NOT IN (${PATCH_SUBURBS.map(() => '?').join(',')})`, '(do_not_call IS NULL OR do_not_call != ?)'];
+  const params = [...PATCH_SUBURBS, 'YES'];
+
+  if (suburb) { conditions.push('suburb = ?'); params.push(suburb); }
+
+  if (type === 'buyer') {
+    conditions.push("(contact_class LIKE '%Buyer%' OR contact_class LIKE '%Prospective Buyer%')");
+  } else if (type === 'vendor') {
+    conditions.push("(contact_class LIKE '%Vendor%' OR contact_class LIKE '%Prospective Vendor%')");
+  }
+
+  conditions.push('mobile IS NOT NULL');
+
+  const where = 'WHERE ' + conditions.join(' AND ');
+  const total = db.prepare(`SELECT COUNT(*) as n FROM agentbox_contacts ${where}`).get(...params).n;
+  const rows = db.prepare(`SELECT * FROM agentbox_contacts ${where} ORDER BY last_modified DESC LIMIT ? OFFSET ?`).all(...params, limit, offset);
+
+  res.json({ rows, total, page, pages: Math.ceil(total / limit) });
+});
+```
+
+**Step 2: Add ReferralProspectsPage component**
+
+```jsx
+function ReferralProspectsPage() {
+  const [results, setResults] = React.useState([]);
+  const [total, setTotal] = React.useState(0);
+  const [suburb, setSuburb] = React.useState('');
+  const [type, setType] = React.useState('buyer');
+  const [page, setPage] = React.useState(1);
+  const [loading, setLoading] = React.useState(false);
+  const [referContact, setReferContact] = React.useState(null);
+
+  function search(p = 1) {
+    setLoading(true);
+    const params = new URLSearchParams({ type, page: p });
+    if (suburb.trim()) params.set('suburb', suburb.trim());
+    apiFetch(`/api/referral-prospects?${params}`).then(r => r.json()).then(data => {
+      setResults(data.rows || []);
+      setTotal(data.total || 0);
+      setPage(p);
+      setLoading(false);
+    });
+  }
+
+  React.useEffect(() => { search(1); }, [type]);
+
+  return (
+    <div style={{padding:'20px',maxWidth:'900px'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'16px'}}>
+        <h2 style={{color:'var(--gold)',margin:0,fontSize:'18px',letterSpacing:'0.1em'}}>REFERRAL PROSPECTS</h2>
+        <span style={{color:'var(--text-muted)',fontSize:'12px'}}>{total.toLocaleString()} contacts</span>
+      </div>
+
+      {/* Filters */}
+      <div style={{display:'flex',gap:'8px',marginBottom:'16px',flexWrap:'wrap'}}>
+        <select value={type} onChange={e => { setType(e.target.value); setPage(1); }}
+          style={{background:'var(--bg-raised)',border:'1px solid var(--border-subtle)',color:'var(--text-primary)',padding:'8px 12px',borderRadius:'4px',fontSize:'12px'}}>
+          <option value="buyer">Active Buyers</option>
+          <option value="vendor">Prospective Vendors</option>
+          <option value="all">All</option>
+        </select>
+        <input value={suburb} onChange={e => setSuburb(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && search(1)}
+          placeholder="Filter by suburb (e.g. Mosman)"
+          style={{flex:1,minWidth:'180px',background:'var(--bg-raised)',border:'1px solid var(--border-subtle)',color:'var(--text-primary)',padding:'8px 12px',borderRadius:'4px',fontSize:'12px'}} />
+        <button onClick={() => search(1)}
+          style={{padding:'8px 20px',background:'var(--gold)',color:'#000',border:'none',borderRadius:'4px',fontWeight:'600',cursor:'pointer',fontSize:'12px'}}>
+          Search
+        </button>
+      </div>
+
+      {/* Type emphasis banner for buyers */}
+      {type === 'buyer' && (
+        <div style={{padding:'10px 14px',background:'rgba(59,130,246,0.08)',border:'1px solid rgba(59,130,246,0.3)',borderRadius:'4px',marginBottom:'16px',fontSize:'12px',color:'#3b82f6'}}>
+          Buyers agent referrals pay <strong>$2,000–$5,000</strong> per settled purchase. Capture their brief to maximise referral value.
+        </div>
+      )}
+
+      {loading && <div style={{color:'var(--text-muted)',textAlign:'center',padding:'40px'}}>Loading...</div>}
+
+      {!loading && results.map(c => (
+        <div key={c.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 14px',background:'var(--bg-surface)',border:'1px solid var(--border-subtle)',borderRadius:'4px',marginBottom:'6px'}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{color:'var(--text-primary)',fontSize:'13px',fontWeight:'500'}}>{c.name}</div>
+            <div style={{color:'var(--text-muted)',fontSize:'11px'}}>{c.address}{c.suburb ? ` · ${c.suburb}` : ''}</div>
+            <div style={{color:'var(--text-muted)',fontSize:'10px',marginTop:'2px'}}>{c.contact_class}</div>
+          </div>
+          <div style={{display:'flex',gap:'8px',alignItems:'center',flexShrink:0,marginLeft:'12px'}}>
+            {c.mobile && <a href={`tel:${c.mobile}`} style={{color:'var(--gold)',fontSize:'12px',textDecoration:'none'}}>{c.mobile}</a>}
+            <button onClick={() => setReferContact(c)}
+              style={{padding:'5px 12px',background:'transparent',border:'1px solid var(--border-gold)',color:'var(--gold)',borderRadius:'4px',cursor:'pointer',fontSize:'11px',fontWeight:'600'}}>
+              Refer
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {/* Pagination */}
+      {total > 50 && (
+        <div style={{display:'flex',gap:'8px',marginTop:'16px',justifyContent:'center'}}>
+          <button onClick={() => search(page - 1)} disabled={page <= 1}
+            style={{padding:'6px 16px',background:'var(--bg-raised)',border:'1px solid var(--border-subtle)',color:'var(--text-muted)',borderRadius:'4px',cursor:'pointer',fontSize:'12px'}}>
+            Prev
+          </button>
+          <span style={{color:'var(--text-muted)',fontSize:'12px',lineHeight:'30px'}}>Page {page}</span>
+          <button onClick={() => search(page + 1)} disabled={results.length < 50}
+            style={{padding:'6px 16px',background:'var(--bg-raised)',border:'1px solid var(--border-subtle)',color:'var(--text-muted)',borderRadius:'4px',cursor:'pointer',fontSize:'12px'}}>
+            Next
+          </button>
+        </div>
+      )}
+
+      {referContact && (
+        <ReferModal
+          contact={{...referContact, contact_class: referContact.contact_class}}
+          onClose={() => setReferContact(null)}
+          onSuccess={() => setReferContact(null)}
+        />
+      )}
+    </div>
+  );
+}
+```
+
+**Step 3: Wire routing**
+
+Add to App routing:
+```jsx
+if (page === 'prospects') return <ReferralProspectsPage />;
+```
+
+Add to sidebar and BottomTabBar under REFERRALS:
+```jsx
+{ id: 'prospects', label: 'PROSPECTS', icon: 'Users' }
+```
+
+**Step 4: Test**
+
+```bash
+source /root/.openclaw/.env
+curl -sk "https://localhost:4242/api/referral-prospects?type=buyer&suburb=Mosman" \
+  -H "Authorization: Bearer $DASHBOARD_PASSWORD" | python3 -m json.tool | head -40
+```
+
+Expected: 50 buyer contacts from Mosman with name/mobile/contact_class.
+
+Open dashboard → PROSPECTS nav item → "Active Buyers" filter default → Mosman buyers visible → click "Refer" → ReferModal opens with buyer brief fields.
+
+**Step 5: Commit**
+
+```bash
+cd /root/.openclaw
+git add snapshot-server.js workspace/dashboard/dashboard.js
+git commit -m "feat: add referral prospects page with buyers-first filter and 124k CRM search"
+```
+
+---
+
+### Task 10: End-to-End Smoke Test
+
+**Full vendor referral flow:**
+1. REFERRALS → Manage Partners → add "McGrath Mosman Agent", selling_agent, 20%, suburb: Mosman
+2. Call board → open contact → Refer → type: vendor → fee shows `~$X (20%)` → tick disclosure → submit
+3. REFERRALS page → card in "Referred" column → advance to "Introduced"
+
+**Full buyer referral flow:**
+1. Add "Sydney Buyers Agency", buyers_agent, flat $3500
+2. PROSPECTS page → type: Active Buyers → filter suburb: Mosman → click Refer on a result
+3. Modal shows blue buyer brief section → fill budget $1.8M–$2.2M, suburbs: Mosman/Cremorne, pre-approved: yes, timeframe: 1–3 months
+4. Tick disclosure → submit
+5. REFERRALS page → buyer card shows brief summary in blue: `$1.8M–$2.2M · Mosman/Cremorne · Pre-approved ✓ · 1–3 months`
+6. Mark as "Introduced" → Active Pipeline total updates
+
+**Full finance referral flow:**
+1. Add "Shore Finance", mortgage_broker, flat $800
+2. Refer any buyer contact → type: finance → fee shows $800 flat → submit
+3. Pipeline card shows correctly
 
 **Final commit**
 
