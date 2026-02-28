@@ -1319,7 +1319,7 @@ app.patch('/api/reminders/:id', requireAuth, (req, res) => {
     if (finalIsTask === 0 && !finalFireAt) {
       return res.status(400).json({ error: 'A reminder (non-task) must have a fire_at date.' });
     }
-    const ALLOWED = ['note', 'fire_at', 'contact_name', 'contact_mobile', 'is_task', 'priority'];
+    const ALLOWED = ['note', 'fire_at', 'contact_name', 'contact_mobile', 'is_task', 'priority', 'duration_minutes'];
     const sets = [], vals = [];
     for (const key of ALLOWED) {
       if (req.body[key] !== undefined) {

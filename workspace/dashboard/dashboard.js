@@ -2633,7 +2633,7 @@ function AddEditReminderModal({ token, reminder, initialValues = null, defaultIs
     setError('');
     const body = {
       note: note.trim(),
-      contact_name: contactName.trim() || null,
+      contact_name: contactName.trim() || 'Manual Task',
       contact_mobile: contactMobile.trim() || null,
       fire_at: isTask ? (fireAt || undefined) : fireAt,
       is_task: isTask ? 1 : 0,
