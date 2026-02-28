@@ -3062,6 +3062,300 @@ app.post('/api/buyer-profiles/:id/log-call', requireAuth, (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// REFERRAL BUSINESS — Partners + Referrals CRUD + AI endpoints
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── AI endpoints first (must be before parameterised routes) ─────────────────
+
+// POST /api/referrals/polish-brief — Haiku polishes a buyer brief into a compelling paragraph
+app.post('/api/referrals/polish-brief', requireAuth, async (req, res) => {
+  try {
+    const { budget_min, budget_max, suburbs, property_type, timeframe, pre_approved, raw_notes } = req.body;
+
+    const userContent = [
+      budget_min    ? `Budget: $${budget_min}–$${budget_max}` : '',
+      suburbs       ? `Target suburbs: ${Array.isArray(suburbs) ? suburbs.join(', ') : suburbs}` : '',
+      property_type ? `Property type: ${property_type}` : '',
+      timeframe     ? `Timeframe: ${timeframe}` : '',
+      pre_approved  !== undefined ? `Pre-approved: ${pre_approved ? 'Yes' : 'No'}` : '',
+      raw_notes     ? `Notes: ${raw_notes}` : '',
+    ].filter(Boolean).join('\n');
+
+    if (!userContent.trim()) return res.status(400).json({ error: 'at least one brief field is required' });
+
+    const apiRes = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model:      'claude-haiku-4-5-20251001',
+        max_tokens: 200,
+        system:     'You are a premium real estate referral specialist. Given a buyer\'s brief, write ONE concise professional paragraph (2-4 sentences, max 80 words) that a buyers agent would find compelling. Focus on: budget, target suburbs, property requirements, urgency/motivation, and pre-approval status. Write in third person ("My buyer is..."). Be specific, professional, and compelling. Return only the paragraph, no preamble.',
+        messages:   [{ role: 'user', content: userContent }],
+      },
+      {
+        headers: {
+          'x-api-key':         process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type':      'application/json',
+        },
+        timeout: 15000,
+      }
+    );
+
+    const brief = apiRes.data.content[0].text.trim();
+    res.json({ brief });
+  } catch (e) {
+    console.error('[POST /api/referrals/polish-brief]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/referral-prospects/outreach-script — Haiku generates a personalised SMS opener
+app.post('/api/referral-prospects/outreach-script', requireAuth, async (req, res) => {
+  try {
+    const { name, suburb, address, contact_class, last_modified } = req.body;
+    if (!name) return res.status(400).json({ error: 'name is required' });
+
+    const userContent = [
+      `Name: ${name}`,
+      suburb        ? `Suburb: ${suburb}` : '',
+      address       ? `Address: ${address}` : '',
+      contact_class ? `Contact class: ${contact_class}` : '',
+      last_modified ? `Last contact: ${last_modified}` : '',
+    ].filter(Boolean).join('\n');
+
+    const apiRes = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model:      'claude-haiku-4-5-20251001',
+        max_tokens: 100,
+        system:     'You are Bailey O\'Byrne, a top-performing real estate agent at McGrath Willoughby. Generate a short, natural, personalised outreach SMS (max 160 chars) to reconnect with a contact. Use their name, suburb context, and contact class to personalise. Sound genuine, not salesy. The goal is to open a conversation about their property plans. Return only the SMS text, no quotes or preamble.',
+        messages:   [{ role: 'user', content: userContent }],
+      },
+      {
+        headers: {
+          'x-api-key':         process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type':      'application/json',
+        },
+        timeout: 15000,
+      }
+    );
+
+    const script = apiRes.data.content[0].text.trim();
+    res.json({ script });
+  } catch (e) {
+    console.error('[POST /api/referral-prospects/outreach-script]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Partners CRUD ────────────────────────────────────────────────────────────
+
+const VALID_PARTNER_TYPES = ['selling_agent', 'buyers_agent', 'mortgage_broker'];
+const PARTNER_UPDATE_FIELDS = ['name', 'type', 'suburb_focus', 'fee_type', 'fee_value', 'mobile', 'email', 'notes'];
+
+// GET /api/partners — list all partners ordered by type, name
+app.get('/api/partners', requireAuth, (req, res) => {
+  try {
+    const partners = db.prepare('SELECT * FROM partners ORDER BY type, name').all();
+    res.json({ partners });
+  } catch (e) {
+    console.error('[GET /api/partners]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/partners — create a partner
+app.post('/api/partners', requireAuth, (req, res) => {
+  try {
+    const { name, type, fee_type, fee_value, suburb_focus, mobile, email, notes } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
+    if (!type || !VALID_PARTNER_TYPES.includes(type)) {
+      return res.status(400).json({ error: `type must be one of: ${VALID_PARTNER_TYPES.join(', ')}` });
+    }
+    if (fee_value === undefined || fee_value === null || fee_value === '') {
+      return res.status(400).json({ error: 'fee_value is required' });
+    }
+    const result = db.prepare(`
+      INSERT INTO partners (name, type, suburb_focus, fee_type, fee_value, mobile, email, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      name.trim(),
+      type,
+      suburb_focus || null,
+      fee_type || 'percentage',
+      parseFloat(fee_value),
+      mobile || null,
+      email  || null,
+      notes  || null
+    );
+    const partner = db.prepare('SELECT * FROM partners WHERE id = ?').get(result.lastInsertRowid);
+    res.status(201).json({ ok: true, partner });
+  } catch (e) {
+    console.error('[POST /api/partners]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT /api/partners/:id — update partner (dynamic SET builder, whitelisted fields)
+app.put('/api/partners/:id', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const existing = db.prepare('SELECT id FROM partners WHERE id = ?').get(id);
+    if (!existing) return res.status(404).json({ error: 'not found' });
+
+    const sets = [], vals = [];
+    for (const key of PARTNER_UPDATE_FIELDS) {
+      if (req.body[key] !== undefined) {
+        if (key === 'type' && !VALID_PARTNER_TYPES.includes(req.body[key])) {
+          return res.status(400).json({ error: `type must be one of: ${VALID_PARTNER_TYPES.join(', ')}` });
+        }
+        sets.push(`${key} = ?`);
+        vals.push(key === 'fee_value' ? parseFloat(req.body[key]) : (req.body[key] === '' ? null : req.body[key]));
+      }
+    }
+    if (!sets.length) return res.status(400).json({ error: 'no valid fields to update' });
+    vals.push(id);
+    db.prepare(`UPDATE partners SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    const partner = db.prepare('SELECT * FROM partners WHERE id = ?').get(id);
+    res.json({ ok: true, partner });
+  } catch (e) {
+    console.error('[PUT /api/partners/:id]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/partners/:id — delete (block if partner has referrals)
+app.delete('/api/partners/:id', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const existing = db.prepare('SELECT id FROM partners WHERE id = ?').get(id);
+    if (!existing) return res.status(404).json({ error: 'not found' });
+    const referralCount = db.prepare('SELECT COUNT(*) AS cnt FROM referrals WHERE partner_id = ?').get(id);
+    if (referralCount && referralCount.cnt > 0) {
+      return res.status(409).json({ error: `Cannot delete: partner has ${referralCount.cnt} referral(s)` });
+    }
+    db.prepare('DELETE FROM partners WHERE id = ?').run(id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[DELETE /api/partners/:id]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Referrals CRUD ───────────────────────────────────────────────────────────
+
+const VALID_REFERRAL_TYPES    = ['vendor', 'buyer', 'finance'];
+const VALID_REFERRAL_STATUSES = ['referred', 'accepted', 'active', 'settled', 'paid', 'cancelled'];
+const REFERRAL_UPDATE_FIELDS  = ['status', 'actual_fee', 'notes', 'settled_at', 'paid_at', 'buyer_brief', 'disclosure_sent', 'expected_fee'];
+
+// GET /api/referrals — list all referrals, JOIN contacts + partners for display names
+app.get('/api/referrals', requireAuth, (req, res) => {
+  try {
+    const referrals = db.prepare(`
+      SELECT
+        r.*,
+        c.name   AS contact_name,
+        c.mobile AS contact_mobile,
+        c.address AS contact_address,
+        p.name   AS partner_name,
+        p.type   AS partner_type,
+        p.mobile AS partner_mobile
+      FROM referrals r
+      LEFT JOIN contacts c ON c.id = r.contact_id
+      LEFT JOIN partners p ON p.id = r.partner_id
+      ORDER BY r.referred_at DESC
+    `).all();
+    res.json({ referrals });
+  } catch (e) {
+    console.error('[GET /api/referrals]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/referrals — create a referral
+app.post('/api/referrals', requireAuth, (req, res) => {
+  try {
+    const { contact_id, partner_id, type, expected_fee, buyer_brief, notes, disclosure_sent } = req.body;
+    if (!contact_id) return res.status(400).json({ error: 'contact_id is required' });
+    if (!partner_id) return res.status(400).json({ error: 'partner_id is required' });
+    if (!type || !VALID_REFERRAL_TYPES.includes(type)) {
+      return res.status(400).json({ error: `type must be one of: ${VALID_REFERRAL_TYPES.join(', ')}` });
+    }
+    const contactExists = db.prepare('SELECT id FROM contacts WHERE id = ?').get(String(contact_id));
+    if (!contactExists) return res.status(400).json({ error: `contact_id ${contact_id} not found` });
+    const partnerExists = db.prepare('SELECT id FROM partners WHERE id = ?').get(parseInt(partner_id));
+    if (!partnerExists) return res.status(400).json({ error: `partner_id ${partner_id} not found` });
+
+    const result = db.prepare(`
+      INSERT INTO referrals (contact_id, partner_id, type, expected_fee, buyer_brief, notes, disclosure_sent)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      String(contact_id),
+      parseInt(partner_id),
+      type,
+      expected_fee !== undefined ? parseFloat(expected_fee) : null,
+      buyer_brief  || null,
+      notes        || null,
+      disclosure_sent ? 1 : 0
+    );
+    const referral = db.prepare('SELECT * FROM referrals WHERE id = ?').get(result.lastInsertRowid);
+    res.status(201).json({ ok: true, referral });
+  } catch (e) {
+    console.error('[POST /api/referrals]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT /api/referrals/:id — update status/fee/notes + auto-set timestamps on status transitions
+app.put('/api/referrals/:id', requireAuth, (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid id' });
+    const existing = db.prepare('SELECT * FROM referrals WHERE id = ?').get(id);
+    if (!existing) return res.status(404).json({ error: 'not found' });
+
+    const sets = [], vals = [];
+
+    for (const key of REFERRAL_UPDATE_FIELDS) {
+      if (req.body[key] !== undefined) {
+        if (key === 'status' && !VALID_REFERRAL_STATUSES.includes(req.body[key])) {
+          return res.status(400).json({ error: `status must be one of: ${VALID_REFERRAL_STATUSES.join(', ')}` });
+        }
+        sets.push(`${key} = ?`);
+        if (key === 'actual_fee' || key === 'expected_fee') {
+          vals.push(req.body[key] === null || req.body[key] === '' ? null : parseFloat(req.body[key]));
+        } else if (key === 'disclosure_sent') {
+          vals.push(req.body[key] ? 1 : 0);
+        } else {
+          vals.push(req.body[key] === '' ? null : req.body[key]);
+        }
+      }
+    }
+
+    // Auto-set settled_at / paid_at on status transition (only if not already provided)
+    const newStatus = req.body.status;
+    if (newStatus === 'settled' && !existing.settled_at && req.body.settled_at === undefined) {
+      sets.push("settled_at = datetime('now','localtime')");
+    }
+    if (newStatus === 'paid' && !existing.paid_at && req.body.paid_at === undefined) {
+      sets.push("paid_at = datetime('now','localtime')");
+    }
+
+    if (!sets.length) return res.status(400).json({ error: 'no valid fields to update' });
+    vals.push(id);
+    db.prepare(`UPDATE referrals SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    const referral = db.prepare('SELECT * FROM referrals WHERE id = ?').get(id);
+    res.json({ ok: true, referral });
+  } catch (e) {
+    console.error('[PUT /api/referrals/:id]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── Static dashboard (catches all unmatched routes — must be last) ───────────
 app.use(express.static(DASHBOARD_DIR));
 
