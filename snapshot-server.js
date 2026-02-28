@@ -2069,10 +2069,18 @@ async function buildScoredContactsForManual(address, details, minCount = 0) {
       }
     }
 
-    // ── comparable_bonus (soft — no hard filter) ──────────────────────────────
+    // ── comparable_bonus / penalty ────────────────────────────────────────────
     let comparableBonus = 0;
-    if (cand.propertyType) {
-      if (categorizePropertyType(cand.propertyType) === listingCategory) comparableBonus += 40;
+    if (cand.propertyType && listingCategory) {
+      const candCategory = categorizePropertyType(cand.propertyType);
+      if (candCategory === listingCategory) {
+        comparableBonus += 40;
+      } else if (candCategory !== 'Unknown' && listingCategory !== 'Unknown') {
+        // Wrong property type — penalise so wrong-type contacts sort below same-type
+        // Unit appearing near a House listing: strong penalty
+        // House appearing near a Unit listing: lighter penalty
+        comparableBonus += (candCategory === 'Unit' && listingCategory === 'House') ? -60 : -20;
+      }
     }
     if (listingBeds !== null && cand.beds != null && cand.beds > 0) {
       const diff = Math.abs(listingBeds - cand.beds);
