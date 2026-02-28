@@ -3682,14 +3682,14 @@ function JarvisChat({ token }) {
 
 // ── App ────────────────────────────────────────────────────────────────────
 function App() {
-  const [token, setToken] = useState(() => sessionStorage.getItem('jarvis_token') || '');
+  const [token, setToken] = useState(() => localStorage.getItem('jarvis_token') || '');
   const [page, setPage] = useState('calls');
   const [remainingCount, setRemainingCount] = useState(0);
   const [reminderCount, setReminderCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const handleLogin = useCallback((t) => {
-    sessionStorage.setItem('jarvis_token', t);
+    localStorage.setItem('jarvis_token', t);
     setToken(t);
   }, []);
 
