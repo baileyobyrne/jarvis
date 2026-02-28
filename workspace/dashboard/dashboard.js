@@ -10,7 +10,7 @@ const {
   MapPin, Calendar, Check, X, AlertCircle, Home, Activity,
   MessageSquare, PhoneCall, PhoneOff, PhoneMissed, Star, RefreshCw,
   History, Menu, Building2, CheckCircle, Bed, Bath, Car, Plus, Mail,
-  Search, Pencil, Trash2, Copy, SortAsc, Send, ClipboardList, FileEdit
+  Search, Pencil, Trash2, Copy, SortAsc, Send, ClipboardList, FileEdit, Wand2
 } = LucideReact;
 
 // SMS link helper — opens iMessages on macOS
@@ -2357,6 +2357,68 @@ function urgencyClass(r) {
   return 'later';
 }
 
+function QuickAddBar({ token, onParsed }) {
+  const [text, setText]       = React.useState('');
+  const [parsing, setParsing] = React.useState(false);
+  const [error, setError]     = React.useState('');
+
+  const handle = async () => {
+    const trimmed = text.trim();
+    if (!trimmed || parsing) return;
+    setParsing(true);
+    setError('');
+    try {
+      const today = new Date().toLocaleString('en-AU', {
+        weekday: 'long', day: '2-digit', month: 'short',
+        year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+      });
+      const res = await apiFetch('/api/reminders/parse-nl', token, {
+        method: 'POST',
+        body: JSON.stringify({ text: trimmed, today }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setError(err.error || 'Parse failed — try again');
+        return;
+      }
+      const parsed = await res.json();
+      setText('');
+      onParsed(parsed);
+    } catch (_) {
+      setError('Network error — try again');
+    } finally {
+      setParsing(false);
+    }
+  };
+
+  return (
+    <div className="quick-add-bar">
+      <div className="quick-add-inner">
+        <input
+          className="quick-add-input"
+          placeholder='Quick add... "call John next Tuesday 10am re appraisal"'
+          value={text}
+          onChange={e => setText(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && handle()}
+          disabled={parsing}
+        />
+        <button
+          className={`quick-add-btn${parsing ? ' quick-add-btn--loading' : ''}`}
+          onClick={handle}
+          disabled={parsing || !text.trim()}
+          title="Parse with AI"
+        >
+          {parsing
+            ? <RefreshCw size={14} style={{ animation: 'spin 0.8s linear infinite' }} />
+            : <Wand2 size={14} />
+          }
+        </button>
+      </div>
+      {error && <div className="quick-add-error">{error}</div>}
+    </div>
+  );
+}
+
 function RemindersPage({ token, onReminderCountChange }) {
   const [reminders, setReminders] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
@@ -2364,6 +2426,7 @@ function RemindersPage({ token, onReminderCountChange }) {
   const [addIsTask, setAddIsTask] = React.useState(false);
   const [editTarget, setEditTarget] = React.useState(null);
   const [deleteConfirmId, setDeleteConfirmId] = React.useState(null);
+  const [quickValues, setQuickValues] = React.useState(null);
 
   const load = React.useCallback(() => {
     setLoading(true);
@@ -2411,8 +2474,15 @@ function RemindersPage({ token, onReminderCountChange }) {
   const handleSaved = React.useCallback((savedReminder, isEdit) => {
     setShowAddModal(false);
     setEditTarget(null);
+    setQuickValues(null);
     load();
   }, [load]);
+
+  const handleQuickParsed = React.useCallback((parsed) => {
+    setQuickValues(parsed);
+    setAddIsTask(!!parsed.is_task);
+    setShowAddModal(true);
+  }, []);
 
   // Group reminders by time bucket
   function groupReminders(items) {
@@ -2462,6 +2532,8 @@ function RemindersPage({ token, onReminderCountChange }) {
       </div>
 
       <WeekStrip reminders={reminders} />
+
+      <QuickAddBar token={token} onParsed={handleQuickParsed} />
 
       {loading && <div className="loading-msg">Loading...</div>}
 
@@ -2524,9 +2596,14 @@ function RemindersPage({ token, onReminderCountChange }) {
         <AddEditReminderModal
           token={token}
           reminder={editTarget}
+          initialValues={!editTarget ? quickValues : null}
           defaultIsTask={addIsTask}
           onSaved={handleSaved}
-          onClose={() => { setShowAddModal(false); setEditTarget(null); }}
+          onClose={() => {
+            setShowAddModal(false);
+            setEditTarget(null);
+            setQuickValues(null);
+          }}
         />
       )}
     </div>
@@ -2534,26 +2611,22 @@ function RemindersPage({ token, onReminderCountChange }) {
 }
 
 // ── AddEditReminderModal ────────────────────────────────────────────────────
-function AddEditReminderModal({ token, reminder, defaultIsTask, onSaved, onClose }) {
+function AddEditReminderModal({ token, reminder, initialValues = null, defaultIsTask, onSaved, onClose }) {
   const isEdit = !!reminder;
-  const [isTask, setIsTask] = React.useState(isEdit ? (reminder.is_task === 1) : (defaultIsTask || false));
-  const [note, setNote] = React.useState(isEdit ? reminder.note : '');
-  const [contactName, setContactName] = React.useState(isEdit ? (reminder.contact_name || '') : '');
-  const [contactMobile, setContactMobile] = React.useState(isEdit ? (reminder.contact_mobile || '') : '');
-  const [fireAt, setFireAt] = React.useState(isEdit && reminder.fire_at
-    ? reminder.fire_at.slice(0, 16)
-    : (() => {
-        const pad = n => String(n).padStart(2, '0');
-        const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0);
-        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T09:00`;
-      })()
-  );
-  const [duration, setDuration] = React.useState(
-    isEdit && reminder.duration_minutes ? reminder.duration_minutes : 30
-  );
-  const [priority, setPriority] = React.useState(
-    isEdit ? (reminder.priority || 'normal') : 'normal'
-  );
+  const init   = isEdit ? reminder : (initialValues || {});
+  const [isTask,        setIsTask]        = React.useState(isEdit ? (reminder.is_task === 1) : (init.is_task || defaultIsTask || false));
+  const [note,          setNote]          = React.useState(init.note || '');
+  const [contactName,   setContactName]   = React.useState(init.contact_name || '');
+  const [contactMobile, setContactMobile] = React.useState(init.contact_mobile || '');
+  const [fireAt,        setFireAt]        = React.useState(() => {
+    if (init.fire_at) return init.fire_at.slice(0, 16);
+    const pad = n => String(n).padStart(2, '0');
+    const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0);
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T09:00`;
+  });
+  const [duration,      setDuration]      = React.useState(init.duration_minutes || 30);
+  const [priority,      setPriority]      = React.useState(init.priority || 'normal');
+  const [icalTitle,     setIcalTitle]     = React.useState(init.ical_title || null);
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState('');
 
@@ -2570,6 +2643,8 @@ function AddEditReminderModal({ token, reminder, defaultIsTask, onSaved, onClose
       is_task: isTask ? 1 : 0,
       duration_minutes: isTask ? undefined : duration,
       priority,
+      ical_title: icalTitle || null,
+      ...(init.contact_id ? { contact_id: init.contact_id } : {}),
     };
     const path = isEdit ? `/api/reminders/${reminder.id}` : '/api/reminders';
     const method = isEdit ? 'PATCH' : 'POST';
