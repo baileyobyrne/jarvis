@@ -2291,6 +2291,72 @@ function BuyersPage({ token }) {
 }
 
 // ── Reminders Page ─────────────────────────────────────────────────────────
+function WeekStrip({ reminders }) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const dow = today.getDay(); // 0=Sun
+  const monday = new Date(today);
+  monday.setDate(today.getDate() - (dow === 0 ? 6 : dow - 1));
+
+  const days = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    const start = d.getTime();
+    const end = start + 86400000;
+    const count = reminders.filter(r => {
+      if (!r.fire_at) return false;
+      const t = new Date(r.fire_at).getTime();
+      return t >= start && t < end;
+    }).length;
+    return { date: d, count, isToday: d.getTime() === today.getTime() };
+  });
+
+  const DAY_ABBR = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  function scrollToGroup(date) {
+    const now = new Date();
+    const todayEnd = new Date(); todayEnd.setHours(23, 59, 59, 999);
+    const tomorrowEnd = new Date(todayEnd); tomorrowEnd.setDate(tomorrowEnd.getDate() + 1);
+    const weekEnd = new Date(todayEnd); weekEnd.setDate(weekEnd.getDate() + 7);
+    let groupId;
+    if (date < now)               groupId = 'rem-group-overdue';
+    else if (date <= todayEnd)    groupId = 'rem-group-today';
+    else if (date <= tomorrowEnd) groupId = 'rem-group-tomorrow';
+    else if (date <= weekEnd)     groupId = 'rem-group-this-week';
+    else                          groupId = 'rem-group-later';
+    const el = document.getElementById(groupId);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  return (
+    <div className="week-strip">
+      {days.map((d, i) => (
+        <div
+          key={i}
+          className={`week-day${d.isToday ? ' week-day--today' : ''}`}
+          onClick={() => scrollToGroup(d.date)}
+        >
+          <div className="week-day-name">{DAY_ABBR[i]}</div>
+          <div className="week-day-num">{d.date.getDate()}</div>
+          <div className="week-day-dots">
+            {Array.from({ length: Math.min(d.count, 3) }, (_, j) => (
+              <div key={j} className="week-dot" />
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function urgencyClass(r) {
+  if (!r.fire_at) return 'task';
+  const t = new Date(r.fire_at);
+  if (t < new Date()) return 'overdue';
+  const todayEnd = new Date(); todayEnd.setHours(23, 59, 59, 999);
+  if (t <= todayEnd) return 'today';
+  return 'later';
+}
+
 function RemindersPage({ token, onReminderCountChange }) {
   const [reminders, setReminders] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
@@ -2395,6 +2461,8 @@ function RemindersPage({ token, onReminderCountChange }) {
         <span className="rem-count">{totalCount} pending</span>
       </div>
 
+      <WeekStrip reminders={reminders} />
+
       {loading && <div className="loading-msg">Loading...</div>}
 
       {!loading && totalCount === 0 && (
@@ -2405,17 +2473,13 @@ function RemindersPage({ token, onReminderCountChange }) {
         const items = groups[key];
         if (items.length === 0) return null;
         return (
-          <div key={key} className="rem-group">
+          <div key={key} id={`rem-group-${key.replace('_', '-')}`} className="rem-group">
             <div className="rem-group-header" style={{ color }}>
               {label} <span className="rem-group-count">{items.length}</span>
             </div>
             {items.map(r => (
-              <div key={r.id} className={`rem-item${r.is_task ? ' rem-item--task' : ''}`}>
-                <button
-                  className="rem-check-btn"
-                  onClick={() => handleComplete(r.id)}
-                  title="Mark complete"
-                >
+              <div key={r.id} className={`rem-item rem-item--${urgencyClass(r)}${r.is_task ? ' rem-item--task' : ''}${r.priority === 'high' ? ' rem-item--high' : ''}`}>
+                <button className="rem-check-btn" onClick={() => handleComplete(r.id)} title="Mark complete">
                   <div className="rem-check-circle" />
                 </button>
                 <div className="rem-item-body">
@@ -2428,24 +2492,27 @@ function RemindersPage({ token, onReminderCountChange }) {
                       <Phone size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {r.contact_mobile}
                     </a>
                   )}
-                </div>
-                {r.fire_at && (
-                  <div className="rem-item-time">{fmtDate(r.fire_at)} {fmtTime(r.fire_at)}</div>
-                )}
-                <div className="rem-item-actions">
-                  <button className="icon-btn" onClick={() => setEditTarget(r)} title="Edit">
-                    <Pencil size={12} />
-                  </button>
-                  {deleteConfirmId === r.id ? (
-                    <>
-                      <button className="icon-btn icon-btn--danger" onClick={() => handleDelete(r.id)}>Yes</button>
-                      <button className="icon-btn" onClick={() => setDeleteConfirmId(null)}>No</button>
-                    </>
-                  ) : (
-                    <button className="icon-btn icon-btn--danger" onClick={() => setDeleteConfirmId(r.id)} title="Delete">
-                      <Trash2 size={12} />
-                    </button>
-                  )}
+                  <div className="rem-item-footer">
+                    {r.priority === 'high' && <span className="priority-badge">HIGH</span>}
+                    {r.fire_at && (
+                      <span className="rem-item-time">{fmtDate(r.fire_at)} {fmtTime(r.fire_at)}</span>
+                    )}
+                    <div className="rem-item-actions">
+                      <button className="icon-btn" onClick={() => setEditTarget(r)} title="Edit">
+                        <Pencil size={12} />
+                      </button>
+                      {deleteConfirmId === r.id ? (
+                        <>
+                          <button className="icon-btn icon-btn--danger" onClick={() => handleDelete(r.id)}>Yes</button>
+                          <button className="icon-btn" onClick={() => setDeleteConfirmId(null)}>No</button>
+                        </>
+                      ) : (
+                        <button className="icon-btn icon-btn--danger" onClick={() => setDeleteConfirmId(r.id)} title="Delete">
+                          <Trash2 size={12} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
             ))}
@@ -2484,6 +2551,9 @@ function AddEditReminderModal({ token, reminder, defaultIsTask, onSaved, onClose
   const [duration, setDuration] = React.useState(
     isEdit && reminder.duration_minutes ? reminder.duration_minutes : 30
   );
+  const [priority, setPriority] = React.useState(
+    isEdit ? (reminder.priority || 'normal') : 'normal'
+  );
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState('');
 
@@ -2499,6 +2569,7 @@ function AddEditReminderModal({ token, reminder, defaultIsTask, onSaved, onClose
       fire_at: isTask ? (fireAt || undefined) : fireAt,
       is_task: isTask ? 1 : 0,
       duration_minutes: isTask ? undefined : duration,
+      priority,
     };
     const path = isEdit ? `/api/reminders/${reminder.id}` : '/api/reminders';
     const method = isEdit ? 'PATCH' : 'POST';
@@ -2593,6 +2664,21 @@ function AddEditReminderModal({ token, reminder, defaultIsTask, onSaved, onClose
               </div>
             </div>
           )}
+          <div className="modal-field">
+            <label>Priority</label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {['low', 'normal', 'high'].map(p => (
+                <button
+                  key={p}
+                  className={`topup-btn${priority === p ? ' topup-btn--active' : ''}`}
+                  style={{ flex: 1, textTransform: 'capitalize' }}
+                  onClick={() => setPriority(p)}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+          </div>
           {error && <div className="modal-error">{error}</div>}
         </div>
         <div className="modal-footer">
