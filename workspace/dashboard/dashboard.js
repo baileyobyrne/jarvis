@@ -2481,6 +2481,9 @@ function AddEditReminderModal({ token, reminder, defaultIsTask, onSaved, onClose
         return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T09:00`;
       })()
   );
+  const [duration, setDuration] = React.useState(
+    isEdit && reminder.duration_minutes ? reminder.duration_minutes : 30
+  );
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState('');
 
@@ -2495,6 +2498,7 @@ function AddEditReminderModal({ token, reminder, defaultIsTask, onSaved, onClose
       contact_mobile: contactMobile.trim() || null,
       fire_at: isTask ? (fireAt || undefined) : fireAt,
       is_task: isTask ? 1 : 0,
+      duration_minutes: isTask ? undefined : duration,
     };
     const path = isEdit ? `/api/reminders/${reminder.id}` : '/api/reminders';
     const method = isEdit ? 'PATCH' : 'POST';
@@ -2572,6 +2576,23 @@ function AddEditReminderModal({ token, reminder, defaultIsTask, onSaved, onClose
               onChange={e => setFireAt(e.target.value)}
             />
           </div>
+          {!isTask && (
+            <div className="modal-field">
+              <label>Duration</label>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {[15, 30, 60, 120].map(m => (
+                  <button
+                    key={m}
+                    className={`topup-btn${duration === m ? ' topup-btn--active' : ''}`}
+                    style={{ flex: 1 }}
+                    onClick={() => setDuration(m)}
+                  >
+                    {m < 60 ? `${m}m` : `${m / 60}hr`}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {error && <div className="modal-error">{error}</div>}
         </div>
         <div className="modal-footer">
