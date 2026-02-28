@@ -2368,13 +2368,9 @@ function QuickAddBar({ token, onParsed }) {
     setParsing(true);
     setError('');
     try {
-      const today = new Date().toLocaleString('en-AU', {
-        weekday: 'long', day: '2-digit', month: 'short',
-        year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
-      });
       const res = await apiFetch('/api/reminders/parse-nl', token, {
         method: 'POST',
-        body: JSON.stringify({ text: trimmed, today }),
+        body: JSON.stringify({ text: trimmed }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));

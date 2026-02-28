@@ -1127,14 +1127,15 @@ app.patch('/api/plan/:contactId/outcome', requireAuth, (req, res) => {
 // POST /api/reminders/parse-nl — natural language → structured reminder data via Haiku
 app.post('/api/reminders/parse-nl', requireAuth, async (req, res) => {
   try {
-    const { text, today } = req.body;
+    const { text } = req.body;
     if (!text || !text.trim()) {
       return res.status(400).json({ error: 'text is required' });
     }
 
-    const todayStr = today || new Date().toLocaleString('en-AU', {
+    const todayStr = new Date().toLocaleString('en-AU', {
       weekday: 'long', day: '2-digit', month: 'short',
       year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+      timeZone: 'Australia/Sydney',
     });
 
     const systemPrompt = `You are a real estate agent's scheduling assistant. Parse the user's natural language input into a structured reminder or task.
@@ -1192,7 +1193,7 @@ Rules:
 
     // Sanitise output
     const result = {
-      contact_name:   (parsed.contact_name  || '').trim() || null,
+      contact_name:   (parsed.contact_name  || '').trim() || 'Manual Task',
       contact_mobile: (parsed.contact_mobile || '').trim() || null,
       fire_at:        parsed.fire_at   || null,
       note:           parsed.note      || text.trim(),
@@ -1206,7 +1207,7 @@ Rules:
       const norm  = s => (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
       const words = s => norm(s).split(/\s+/).filter(w => w.length > 1);
       const contacts = db.prepare(
-        'SELECT id, name, mobile FROM contacts WHERE name IS NOT NULL LIMIT 5000'
+        'SELECT id, name, mobile FROM contacts WHERE name IS NOT NULL ORDER BY name LIMIT 10000'
       ).all();
       let bestId = null, bestScore = 0, bestMobile = null;
       for (const c of contacts) {
