@@ -4,9 +4,18 @@
  * Re-triggers top_contacts scoring for all active market events.
  * Run once after any change to buildScoredContactsForManual scoring logic.
  *
+ * NOTE: PATCHing listing-type events also triggers buyer-match notifications.
+ * INSERT OR IGNORE prevents duplicate matches for existing buyer profiles, but
+ * any newly-added buyer profiles will be matched and notified. Do not re-run
+ * this script after adding new buyer profiles unless that notification is intended.
+ *
  * Usage: node /root/.openclaw/scripts/rebuild-top-contacts.js
  */
 require('dotenv').config({ path: '/root/.openclaw/.env', override: true });
+if (!process.env.DASHBOARD_PASSWORD) {
+  console.error('DASHBOARD_PASSWORD is not set — check /root/.openclaw/.env');
+  process.exit(1);
+}
 const https = require('https');
 
 function apiRequest(method, path, body) {
