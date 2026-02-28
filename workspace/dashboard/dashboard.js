@@ -3764,6 +3764,7 @@ function Sidebar({ page, onNav, remainingCount, reminderCount, mobileOpen }) {
     { id: 'market', label: 'Market', Icon: TrendingUp },
     { id: 'buyers', label: 'Buyers', Icon: Users },
     { id: 'referrals', label: 'Referrals', Icon: Star },
+    { id: 'prospects', label: 'Prospects', Icon: Search },
     { id: 'reminders', label: 'Reminders', Icon: Bell, badge: reminderCount > 0 ? reminderCount : null },
     { id: 'contacts', label: 'Contacts', Icon: Users },
     { id: 'history', label: 'History', Icon: History }
@@ -3803,6 +3804,7 @@ function MobileHeader({ page, onMenuClick }) {
     market: 'Market',
     buyers: 'Buyers',
     referrals: 'Referrals',
+    prospects: 'Prospects',
     reminders: 'Reminders',
     contacts: 'Contacts',
     history: 'History'
@@ -3829,6 +3831,7 @@ function BottomTabBar({ page, onNav }) {
     { id: 'calls', label: 'Calls', Icon: Phone },
     { id: 'market', label: 'Market', Icon: TrendingUp },
     { id: 'referrals', label: 'Referrals', Icon: Star },
+    { id: 'prospects', label: 'Prospects', Icon: Search },
     { id: 'buyers', label: 'Buyers', Icon: Users },
     { id: 'reminders', label: 'Remind', Icon: Bell },
     { id: 'history', label: 'History', Icon: History }
@@ -4543,6 +4546,259 @@ function ReferralsPage({ token }) {
   );
 }
 
+// ── ReferralProspectsPage ───────────────────────────────────────────────────
+function ReferralProspectsPage({ token }) {
+  const [results, setResults] = React.useState([]);
+  const [total, setTotal] = React.useState(0);
+  const [pages, setPages] = React.useState(1);
+  const [page, setPage] = React.useState(1);
+  const [type, setType] = React.useState('buyer');
+  const [suburb, setSuburb] = React.useState('');
+  const [suburbInput, setSuburbInput] = React.useState('');
+  const [loading, setLoading] = React.useState(false);
+  const [referContact, setReferContact] = React.useState(null);
+  const [scripts, setScripts] = React.useState({}); // contactId -> {text, loading, copied}
+
+  // Load results
+  function load(p = 1, t = type, s = suburb) {
+    setLoading(true);
+    const params = new URLSearchParams({ type: t, page: p });
+    if (s.trim()) params.set('suburb', s.trim());
+    apiFetch(`/api/referral-prospects?${params}`, token)
+      .then(r => r.json())
+      .then(data => {
+        setResults(data.rows || []);
+        setTotal(data.total || 0);
+        setPages(data.pages || 1);
+        setPage(p);
+        setLoading(false);
+      });
+  }
+
+  React.useEffect(() => { load(1, type, suburb); }, [type]);
+
+  function handleSearch(e) {
+    e.preventDefault();
+    setSuburb(suburbInput);
+    load(1, type, suburbInput);
+  }
+
+  async function generateScript(contact) {
+    setScripts(prev => ({ ...prev, [contact.id]: { loading: true, text: '', copied: false } }));
+    const res = await apiFetch('/api/referral-prospects/outreach-script', token, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: contact.name,
+        suburb: contact.suburb,
+        address: contact.address,
+        contact_class: contact.contact_class,
+        last_modified: contact.last_modified
+      })
+    });
+    const data = await res.json();
+    setScripts(prev => ({ ...prev, [contact.id]: { loading: false, text: data.script || '', copied: false } }));
+  }
+
+  function copyScript(id, text) {
+    navigator.clipboard.writeText(text).then(() => {
+      setScripts(prev => ({ ...prev, [id]: { ...prev[id], copied: true } }));
+      setTimeout(() => setScripts(prev => ({ ...prev, [id]: { ...prev[id], copied: false } })), 2000);
+    });
+  }
+
+  const typeOptions = [
+    { value: 'buyer', label: 'Active Buyers', color: '#3b82f6' },
+    { value: 'vendor', label: 'Prospective Vendors', color: 'var(--gold)' },
+    { value: 'all', label: 'All Contacts', color: 'var(--text-muted)' }
+  ];
+  const activeColor = typeOptions.find(t => t.value === type)?.color || 'var(--gold)';
+
+  return (
+    <div style={{ padding: '20px', maxWidth: '900px' }}>
+      {/* Header */}
+      <div style={{ marginBottom: '20px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <h2 style={{ color: 'var(--gold)', margin: '0 0 4px', fontSize: '18px', letterSpacing: '0.1em' }}>
+              REFERRAL PROSPECTS
+            </h2>
+            <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
+              {loading ? 'Loading...' : `${total.toLocaleString()} contacts available`}
+            </div>
+          </div>
+        </div>
+        {type === 'buyer' && (
+          <div style={{ marginTop: '12px', padding: '10px 14px', background: 'rgba(59,130,246,0.08)',
+            border: '1px solid rgba(59,130,246,0.25)', borderRadius: '6px',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ color: '#3b82f6', fontSize: '12px' }}>
+              Each qualified buyer referral = <strong>$2,000-$5,000</strong> per settlement
+            </span>
+            <span style={{ color: '#3b82f6', fontSize: '11px', opacity: 0.7 }}>
+              {total.toLocaleString()} potential leads
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Filter bar */}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
+        {/* Type segmented control */}
+        <div style={{ display: 'flex', background: 'var(--bg-raised)', borderRadius: '6px',
+          border: '1px solid var(--border-subtle)', overflow: 'hidden' }}>
+          {typeOptions.map(opt => (
+            <button key={opt.value} type="button"
+              onClick={() => { setType(opt.value); setPage(1); }}
+              style={{ padding: '7px 14px', border: 'none', cursor: 'pointer', fontSize: '11px',
+                fontWeight: type === opt.value ? '600' : '400',
+                background: type === opt.value ? `${opt.color}20` : 'transparent',
+                color: type === opt.value ? opt.color : 'var(--text-muted)',
+                transition: 'all 0.15s', borderRight: '1px solid var(--border-subtle)' }}>
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Suburb search */}
+        <form onSubmit={handleSearch} style={{ display: 'flex', gap: '6px', flex: 1, minWidth: '200px' }}>
+          <input value={suburbInput} onChange={e => setSuburbInput(e.target.value)}
+            placeholder="Filter by suburb (e.g. Mosman)"
+            style={{ flex: 1, background: 'var(--bg-raised)', border: '1px solid var(--border-subtle)',
+              color: 'var(--text-primary)', padding: '7px 12px', borderRadius: '4px', fontSize: '12px' }} />
+          <button type="submit"
+            style={{ padding: '7px 16px', background: 'var(--gold)', color: '#000',
+              border: 'none', borderRadius: '4px', fontWeight: '600', cursor: 'pointer', fontSize: '12px' }}>
+            Search
+          </button>
+        </form>
+      </div>
+
+      {/* Results */}
+      {loading && (
+        <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>
+          <div style={{ fontSize: '24px', marginBottom: '8px' }}>&#x27F3;</div>
+          Loading prospects...
+        </div>
+      )}
+
+      {!loading && results.length === 0 && (
+        <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)',
+          background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)', borderRadius: '8px' }}>
+          No contacts found for this filter.
+        </div>
+      )}
+
+      {!loading && results.map(contact => {
+        const scriptState = scripts[contact.id];
+        const isBuyer = (contact.contact_class || '').includes('Buyer');
+        const isVendor = (contact.contact_class || '').includes('Vendor') || (contact.contact_class || '').includes('Owner');
+        const badgeColor = isBuyer ? '#3b82f6' : isVendor ? 'var(--gold)' : 'var(--text-muted)';
+
+        return (
+          <div key={contact.id} style={{ marginBottom: '6px', border: '1px solid var(--border-subtle)',
+            borderRadius: '6px', overflow: 'hidden', background: 'var(--bg-surface)' }}>
+            <div style={{ padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+              {/* Left: contact info */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '2px' }}>
+                  <span style={{ color: 'var(--text-primary)', fontSize: '13px', fontWeight: '600' }}>
+                    {contact.name || 'Unknown'}
+                  </span>
+                  <span style={{ padding: '1px 6px', background: `${badgeColor}18`,
+                    color: badgeColor, borderRadius: '3px', fontSize: '9px', fontWeight: '600',
+                    letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                    {isBuyer ? 'BUYER' : isVendor ? 'VENDOR' : 'CONTACT'}
+                  </span>
+                </div>
+                <div style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
+                  {contact.address ? `${contact.address}, ` : ''}{contact.suburb || ''}
+                </div>
+              </div>
+
+              {/* Right: mobile + actions */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                {contact.mobile && (
+                  <a href={`tel:${contact.mobile}`}
+                    style={{ color: 'var(--gold)', fontSize: '12px', textDecoration: 'none',
+                      fontFamily: 'monospace' }}>
+                    {contact.mobile}
+                  </a>
+                )}
+                <button onClick={() => generateScript(contact)}
+                  disabled={scriptState?.loading}
+                  style={{ padding: '5px 10px', background: 'rgba(168,85,247,0.12)',
+                    border: '1px solid rgba(168,85,247,0.35)', color: '#a855f7',
+                    borderRadius: '4px', cursor: 'pointer', fontSize: '10px', fontWeight: '600',
+                    opacity: scriptState?.loading ? 0.6 : 1, whiteSpace: 'nowrap' }}>
+                  {scriptState?.loading ? '...' : '\u2726 Script'}
+                </button>
+                <button onClick={() => setReferContact(contact)}
+                  style={{ padding: '5px 10px', background: 'transparent',
+                    border: '1px solid var(--border-gold)', color: 'var(--gold)',
+                    borderRadius: '4px', cursor: 'pointer', fontSize: '10px', fontWeight: '600',
+                    whiteSpace: 'nowrap' }}>
+                  Refer &#x2192;
+                </button>
+              </div>
+            </div>
+
+            {/* AI Script output */}
+            {scriptState && !scriptState.loading && scriptState.text && (
+              <div style={{ padding: '10px 14px', background: 'rgba(168,85,247,0.06)',
+                borderTop: '1px solid rgba(168,85,247,0.2)', display: 'flex',
+                justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+                <p style={{ margin: 0, color: 'var(--text-primary)', fontSize: '12px',
+                  lineHeight: '1.5', flex: 1, fontStyle: 'italic' }}>
+                  "{scriptState.text}"
+                </p>
+                <button onClick={() => copyScript(contact.id, scriptState.text)}
+                  style={{ padding: '4px 10px', background: scriptState.copied ? '#22c55e20' : 'var(--bg-raised)',
+                    border: `1px solid ${scriptState.copied ? '#22c55e' : 'var(--border-subtle)'}`,
+                    color: scriptState.copied ? '#22c55e' : 'var(--text-muted)',
+                    borderRadius: '3px', cursor: 'pointer', fontSize: '10px', flexShrink: 0,
+                    transition: 'all 0.2s' }}>
+                  {scriptState.copied ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Pagination */}
+      {pages > 1 && !loading && (
+        <div style={{ display: 'flex', gap: '8px', marginTop: '16px', justifyContent: 'center', alignItems: 'center' }}>
+          <button onClick={() => load(page - 1, type, suburb)} disabled={page <= 1}
+            style={{ padding: '6px 14px', background: 'var(--bg-raised)',
+              border: '1px solid var(--border-subtle)', color: page <= 1 ? 'var(--text-muted)' : 'var(--text-primary)',
+              borderRadius: '4px', cursor: page <= 1 ? 'default' : 'pointer', fontSize: '12px' }}>
+            &#x2190; Prev
+          </button>
+          <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
+            Page {page} of {pages} &middot; {total.toLocaleString()} contacts
+          </span>
+          <button onClick={() => load(page + 1, type, suburb)} disabled={page >= pages}
+            style={{ padding: '6px 14px', background: 'var(--bg-raised)',
+              border: '1px solid var(--border-subtle)', color: page >= pages ? 'var(--text-muted)' : 'var(--text-primary)',
+              borderRadius: '4px', cursor: page >= pages ? 'default' : 'pointer', fontSize: '12px' }}>
+            Next &#x2192;
+          </button>
+        </div>
+      )}
+
+      {/* ReferModal */}
+      {referContact && (
+        <ReferModal
+          contact={referContact}
+          token={token}
+          onClose={() => setReferContact(null)}
+          onSuccess={() => setReferContact(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 // ── App ────────────────────────────────────────────────────────────────────
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem('jarvis_token') || '');
@@ -4587,6 +4843,7 @@ function App() {
     market: { title: 'Market Events', subtitle: 'RECENT ACTIVITY — 14 DAYS' },
     buyers: { title: 'Buyer Profiles', subtitle: 'BUYER CRM — ACTIVE ENQUIRIES & MATCHES' },
     referrals: { title: 'Referrals Pipeline', subtitle: 'PARTNER REFERRALS — REVENUE TRACKER' },
+    prospects: { title: 'Referral Prospects', subtitle: 'CRM BUYER & VENDOR LEADS — 124K CONTACTS' },
     reminders: { title: 'Reminders', subtitle: 'UPCOMING FOLLOW-UPS' },
     contacts: { title: 'Contacts', subtitle: 'CRM + PRICEFINDER — CONTACTS & PROPERTIES' },
     history: { title: 'Call History', subtitle: 'TODAY\'S LOGGED OUTCOMES' }
@@ -4599,6 +4856,7 @@ function App() {
       case 'market':    return <MarketPage token={token} />;
       case 'buyers':    return <BuyersPage token={token} />;
       case 'referrals': return <ReferralsPage token={token} />;
+      case 'prospects': return <ReferralProspectsPage token={token} />;
       case 'reminders': return <RemindersPage token={token} onReminderCountChange={setReminderCount} />;
       case 'contacts':  return <SearchPage token={token} />;
       case 'history':   return <HistoryPage token={token} />;
