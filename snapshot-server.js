@@ -760,7 +760,7 @@ app.get('/api/alerts', (req, res) => {
          ORDER BY called_at DESC`
       ).all(...safeIds);
       for (const row of rows) {
-        if (!outcomeMap[row.contact_id]) outcomeMap[row.contact_id] = row.outcome;
+        if (!outcomeMap[row.contact_id]) outcomeMap[row.contact_id] = { outcome: row.outcome, called_at: row.called_at };
       }
     }
 
@@ -791,7 +791,8 @@ app.get('/api/alerts', (req, res) => {
           id: r.contact_id, name: r.name || r.contact_id,
           mobile: r.mobile || '', address: r.contact_address || '',
           watchedAt: r.added_at, isWatcher: true,
-          outcome: outcomeMap[r.contact_id] || null,
+          outcome:   (outcomeMap[r.contact_id] || {}).outcome   || null,
+          called_at: (outcomeMap[r.contact_id] || {}).called_at || null,
         });
       });
     }
@@ -804,7 +805,8 @@ app.get('/api/alerts', (req, res) => {
         .filter(c => !watcherIds.has(c.id))   // don't duplicate watcher in topContacts
         .map(c => ({
           ...c,
-          outcome:  c.id ? (outcomeMap[String(c.id)] || null) : null,
+          outcome:    c.id ? ((outcomeMap[String(c.id)] || {}).outcome    || null) : null,
+          called_at:  c.id ? ((outcomeMap[String(c.id)] || {}).called_at  || null) : null,
           watching: alert.type === 'listing' && c.id
                       ? watchingSet.has(`${c.id}|${normAddr}`) : undefined,
         }));
