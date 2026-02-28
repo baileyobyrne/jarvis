@@ -3150,6 +3150,48 @@ app.post('/api/referral-prospects/outreach-script', requireAuth, async (req, res
   }
 });
 
+// GET /api/referral-prospects?type=buyer|vendor|all&suburb=X&page=1
+app.get('/api/referral-prospects', requireAuth, (req, res) => {
+  const VALID_TYPES = ['buyer', 'vendor', 'all'];
+  const type = VALID_TYPES.includes(req.query.type) ? req.query.type : 'buyer';
+  const suburb = typeof req.query.suburb === 'string' ? req.query.suburb.trim() : null;
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = 50;
+  const offset = (page - 1) * limit;
+
+  const PATCH_SUBURBS = ['Willoughby', 'North Willoughby', 'Willoughby East', 'Castlecrag', 'Middle Cove'];
+
+  const conditions = [
+    `suburb NOT IN (${PATCH_SUBURBS.map(() => '?').join(',')})`,
+    "(do_not_call IS NULL OR do_not_call = '' OR do_not_call != 'YES')",
+    'mobile IS NOT NULL',
+    "mobile != ''"
+  ];
+  const params = [...PATCH_SUBURBS];
+
+  if (suburb) { conditions.push('suburb = ?'); params.push(suburb); }
+
+  if (type === 'buyer') {
+    conditions.push("(contact_class LIKE '%Buyer%' OR contact_class LIKE '%Prospective Buyer%')");
+  } else if (type === 'vendor') {
+    conditions.push("(contact_class LIKE '%Vendor%' OR contact_class LIKE '%Prospective Vendor%')");
+  }
+
+  const where = 'WHERE ' + conditions.join(' AND ');
+  try {
+    const total = db.prepare(`SELECT COUNT(*) as n FROM agentbox_contacts ${where}`).get(...params).n;
+    const rows = db.prepare(`
+      SELECT * FROM agentbox_contacts ${where}
+      ORDER BY last_modified DESC LIMIT ? OFFSET ?
+    `).all(...params, limit, offset);
+
+    res.json({ rows, total, page, pages: Math.ceil(total / limit) });
+  } catch (e) {
+    console.error('[GET /api/referral-prospects]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── Partners CRUD ────────────────────────────────────────────────────────────
 
 const VALID_PARTNER_TYPES = ['selling_agent', 'buyers_agent', 'mortgage_broker'];
