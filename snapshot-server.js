@@ -3177,6 +3177,10 @@ app.post('/api/partners', requireAuth, (req, res) => {
     if (fee_value === undefined || fee_value === null || fee_value === '') {
       return res.status(400).json({ error: 'fee_value is required' });
     }
+    const parsedFee = parseFloat(fee_value);
+    if (isNaN(parsedFee)) {
+      return res.status(400).json({ error: 'fee_value must be a valid number' });
+    }
     const result = db.prepare(`
       INSERT INTO partners (name, type, suburb_focus, fee_type, fee_value, mobile, email, notes)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -3185,7 +3189,7 @@ app.post('/api/partners', requireAuth, (req, res) => {
       type,
       suburb_focus || null,
       fee_type || 'percentage',
-      parseFloat(fee_value),
+      parsedFee,
       mobile || null,
       email  || null,
       notes  || null
@@ -3339,10 +3343,10 @@ app.put('/api/referrals/:id', requireAuth, (req, res) => {
     // Auto-set settled_at / paid_at on status transition (only if not already provided)
     const newStatus = req.body.status;
     if (newStatus === 'settled' && !existing.settled_at && req.body.settled_at === undefined) {
-      sets.push("settled_at = datetime('now','localtime')");
+      sets.push("settled_at = datetime('now')");
     }
     if (newStatus === 'paid' && !existing.paid_at && req.body.paid_at === undefined) {
-      sets.push("paid_at = datetime('now','localtime')");
+      sets.push("paid_at = datetime('now')");
     }
 
     if (!sets.length) return res.status(400).json({ error: 'no valid fields to update' });
