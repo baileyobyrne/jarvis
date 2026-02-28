@@ -3426,7 +3426,7 @@ app.post('/api/referrals', requireAuth, (req, res) => {
       parseInt(partner_id),
       type,
       expected_fee !== undefined ? parseFloat(expected_fee) : null,
-      buyer_brief  || null,
+      buyer_brief  ? (typeof buyer_brief === 'string' ? buyer_brief : JSON.stringify(buyer_brief)) : null,
       notes        || null,
       disclosure_sent ? 1 : 0
     );
