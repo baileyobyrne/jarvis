@@ -498,6 +498,7 @@ function ContactCard({ contact, token, onLogged, context, eventAddress, autoExpa
   const [copied,         setCopied]         = useState(false);
   const [showEdit,       setShowEdit]       = useState(false);
   const [showNotes,      setShowNotes]      = useState(false);
+  const [showReferModal, setShowReferModal] = useState(false);
   const [localContact,   setLocalContact]   = useState(contact);
 
   useEffect(() => { if (autoExpand) setExpanded(true); }, [autoExpand]);
@@ -646,6 +647,15 @@ function ContactCard({ contact, token, onLogged, context, eventAddress, autoExpa
             onClick={e => { e.stopPropagation(); setShowNotes(true); }}
             title="Notes &amp; history"
           ><ClipboardList size={11} /></button>
+          <button
+            onClick={e => { e.stopPropagation(); setShowReferModal(true); }}
+            title="Refer contact to a partner"
+            style={{padding:'5px 10px',background:'transparent',
+              border:'1px solid var(--border-gold)',color:'var(--gold)',
+              borderRadius:'4px',cursor:'pointer',fontSize:'11px',fontWeight:'500',
+              letterSpacing:'0.05em'}}>
+            Refer
+          </button>
           {context === 'listed' && contactId && (
             <button
               className={`watcher-toggle${watching ? ' watcher-toggle--active' : ''}`}
@@ -787,6 +797,15 @@ function ContactCard({ contact, token, onLogged, context, eventAddress, autoExpa
           token={token}
           prefilledNote={notePreFill}
           onClose={() => setShowNotes(false)}
+        />
+      )}
+
+      {/* Refer modal */}
+      {showReferModal && (
+        <ReferModal
+          contact={localContact}
+          onClose={() => setShowReferModal(false)}
+          onSuccess={() => setShowReferModal(false)}
         />
       )}
     </div>
@@ -1129,6 +1148,282 @@ function ContactNotesModal({ contact, token, onClose, prefilledNote = '' }) {
 }
 
 // ProspectCard removed — unified ContactCard above handles all contexts
+
+// ── Refer Modal ─────────────────────────────────────────────────────────────
+function ReferModal({ contact, onClose, onSuccess }) {
+  const [partners, setPartners] = React.useState([]);
+  const [partnerId, setPartnerId] = React.useState('');
+  const [type, setType] = React.useState('');
+  const [disclosureSent, setDisclosureSent] = React.useState(false);
+  const [notes, setNotes] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [buyerBrief, setBuyerBrief] = React.useState({
+    budget_min: '', budget_max: '', suburbs: '',
+    property_type: '', timeframe: '', pre_approved: ''
+  });
+  const [polishingBrief, setPolishingBrief] = React.useState(false);
+  const [polishedBrief, setPolishedBrief] = React.useState('');
+
+  React.useEffect(() => {
+    apiFetch('/api/partners').then(r => r.json()).then(data => {
+      setPartners(data);
+      if (data.length) setPartnerId(String(data[0].id));
+    }).catch(() => {});
+    const cc = (contact.contact_class || contact.contactClass || '').toLowerCase();
+    if (cc.includes('vendor')) setType('vendor');
+    else if (cc.includes('buyer')) setType('buyer');
+    else setType('finance');
+    apiFetch(`/api/buyer-profiles?contact_id=${contact.id}`).then(r => r.json()).then(profiles => {
+      if (Array.isArray(profiles) && profiles.length) {
+        const p = profiles[0];
+        setBuyerBrief(prev => ({
+          ...prev,
+          budget_min: p.price_min || '',
+          budget_max: p.price_max || '',
+          suburbs: p.suburbs_wanted || '',
+          property_type: p.property_type || '',
+          timeframe: p.timeframe || ''
+        }));
+      }
+    }).catch(() => {});
+  }, []);
+
+  const partner = partners.find(p => String(p.id) === partnerId);
+
+  const feeDisplay = partner ? (
+    partner.fee_type === 'percentage'
+      ? `~${partner.fee_value}% of commission`
+      : `$${Number(partner.fee_value).toLocaleString()} flat`
+  ) : '';
+
+  const typeColor = { vendor: 'var(--gold)', buyer: '#3b82f6', finance: '#22c55e' };
+  const typeLabel = { vendor: 'Vendor Lead', buyer: 'Buyer Lead', finance: 'Finance Lead' };
+
+  async function handlePolishBrief() {
+    setPolishingBrief(true);
+    try {
+      const res = await apiFetch('/api/referrals/polish-brief', {
+        method: 'POST',
+        body: JSON.stringify({ ...buyerBrief, raw_notes: notes })
+      });
+      const data = await res.json();
+      if (data.brief) setPolishedBrief(data.brief);
+    } catch(e) {}
+    setPolishingBrief(false);
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!disclosureSent) { setError('Confirm disclosure was sent before referring.'); return; }
+    if (!partnerId) { setError('Select a partner.'); return; }
+    setSaving(true);
+    setError('');
+    const feeVal = partner && partner.fee_type === 'flat' ? partner.fee_value : null;
+    const briefPayload = type === 'buyer' ? JSON.stringify({ ...buyerBrief, ai_brief: polishedBrief || undefined }) : null;
+    const res = await apiFetch('/api/referrals', {
+      method: 'POST',
+      body: JSON.stringify({
+        contact_id: contact.id,
+        partner_id: parseInt(partnerId),
+        type, expected_fee: feeVal,
+        disclosure_sent: true,
+        buyer_brief: briefPayload,
+        notes
+      })
+    });
+    setSaving(false);
+    if (res.ok) { onSuccess && onSuccess(); onClose(); }
+    else { const d = await res.json(); setError(d.error || 'Failed to save referral'); }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={e => e.stopPropagation()}
+        style={{maxWidth:'480px',background:'var(--bg-surface)',border:'1px solid var(--border-gold)'}}>
+        {/* Header */}
+        <div style={{padding:'16px 20px',borderBottom:'1px solid var(--border-subtle)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div>
+            <div style={{color:'var(--gold)',fontSize:'13px',fontWeight:'600',letterSpacing:'0.1em'}}>REFER CONTACT</div>
+            <div style={{color:'var(--text-primary)',fontSize:'15px',fontWeight:'500',marginTop:'2px'}}>{contact.name}</div>
+            <div style={{color:'var(--text-muted)',fontSize:'11px'}}>{contact.address || contact.contact_address}</div>
+          </div>
+          <button onClick={onClose} style={{background:'none',border:'none',color:'var(--text-muted)',cursor:'pointer',fontSize:'20px',lineHeight:1}}>×</button>
+        </div>
+
+        <form onSubmit={handleSubmit} style={{padding:'16px 20px',display:'flex',flexDirection:'column',gap:'14px'}}>
+          {/* Type selector */}
+          <div>
+            <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',letterSpacing:'0.08em',marginBottom:'6px'}}>LEAD TYPE</label>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'6px'}}>
+              {['vendor','buyer','finance'].map(t => (
+                <button type="button" key={t} onClick={() => setType(t)}
+                  style={{padding:'8px 4px',border:`1px solid ${type===t ? typeColor[t] : 'var(--border-subtle)'}`,
+                    background: type===t ? `${typeColor[t]}15` : 'var(--bg-raised)',
+                    color: type===t ? typeColor[t] : 'var(--text-muted)',
+                    borderRadius:'4px',cursor:'pointer',fontSize:'11px',fontWeight: type===t ? '600' : '400',
+                    transition:'all 0.15s'}}>
+                  {typeLabel[t]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Partner selector */}
+          <div>
+            <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',letterSpacing:'0.08em',marginBottom:'6px'}}>PARTNER</label>
+            {partners.length === 0
+              ? <div style={{padding:'10px',background:'var(--bg-raised)',borderRadius:'4px',color:'var(--text-muted)',fontSize:'12px'}}>
+                  No partners yet — add them in the Referrals page first.
+                </div>
+              : <select value={partnerId} onChange={e => setPartnerId(e.target.value)}
+                  style={{width:'100%',background:'var(--bg-raised)',border:'1px solid var(--border-subtle)',
+                    color:'var(--text-primary)',padding:'9px 12px',borderRadius:'4px',fontSize:'13px'}}>
+                  {partners.map(p => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} · {p.type.replace(/_/g,' ')} {p.suburb_focus ? `(${p.suburb_focus})` : ''}
+                    </option>
+                  ))}
+                </select>
+            }
+            {partner && (
+              <div style={{marginTop:'6px',padding:'8px 12px',background:'rgba(200,169,110,0.08)',
+                border:'1px solid var(--border-gold)',borderRadius:'4px',display:'flex',justifyContent:'space-between',
+                alignItems:'center',fontSize:'12px'}}>
+                <span style={{color:'var(--text-muted)'}}>Referral fee</span>
+                <span style={{color:'var(--gold)',fontWeight:'600'}}>{feeDisplay}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Buyer brief section — only when type = buyer */}
+          {type === 'buyer' && (
+            <div style={{border:'1px solid rgba(59,130,246,0.35)',borderRadius:'6px',overflow:'hidden'}}>
+              <div style={{padding:'10px 14px',background:'rgba(59,130,246,0.08)',
+                display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <span style={{color:'#3b82f6',fontSize:'11px',fontWeight:'600',letterSpacing:'0.08em'}}>BUYER BRIEF</span>
+                <span style={{color:'#3b82f6',fontSize:'10px',opacity:0.7}}>Increases referral value to $3–5k</span>
+              </div>
+              <div style={{padding:'12px 14px',display:'flex',flexDirection:'column',gap:'10px'}}>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
+                  <div>
+                    <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',marginBottom:'3px'}}>BUDGET MIN</label>
+                    <input type="number" value={buyerBrief.budget_min}
+                      onChange={e => setBuyerBrief({...buyerBrief,budget_min:e.target.value})}
+                      placeholder="1500000"
+                      style={{width:'100%',boxSizing:'border-box',background:'var(--bg-base)',border:'1px solid var(--border-subtle)',
+                        color:'var(--text-primary)',padding:'7px 10px',borderRadius:'4px',fontSize:'12px'}} />
+                  </div>
+                  <div>
+                    <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',marginBottom:'3px'}}>BUDGET MAX</label>
+                    <input type="number" value={buyerBrief.budget_max}
+                      onChange={e => setBuyerBrief({...buyerBrief,budget_max:e.target.value})}
+                      placeholder="2200000"
+                      style={{width:'100%',boxSizing:'border-box',background:'var(--bg-base)',border:'1px solid var(--border-subtle)',
+                        color:'var(--text-primary)',padding:'7px 10px',borderRadius:'4px',fontSize:'12px'}} />
+                  </div>
+                </div>
+                <div>
+                  <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',marginBottom:'3px'}}>TARGET SUBURBS</label>
+                  <input value={buyerBrief.suburbs}
+                    onChange={e => setBuyerBrief({...buyerBrief,suburbs:e.target.value})}
+                    placeholder="e.g. Mosman, Cremorne, Neutral Bay"
+                    style={{width:'100%',boxSizing:'border-box',background:'var(--bg-base)',border:'1px solid var(--border-subtle)',
+                      color:'var(--text-primary)',padding:'7px 10px',borderRadius:'4px',fontSize:'12px'}} />
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px'}}>
+                  <div>
+                    <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',marginBottom:'3px'}}>PROPERTY TYPE</label>
+                    <select value={buyerBrief.property_type}
+                      onChange={e => setBuyerBrief({...buyerBrief,property_type:e.target.value})}
+                      style={{width:'100%',background:'var(--bg-base)',border:'1px solid var(--border-subtle)',
+                        color:'var(--text-primary)',padding:'7px',borderRadius:'4px',fontSize:'11px'}}>
+                      <option value="">Any</option>
+                      <option value="house">House</option>
+                      <option value="unit">Unit</option>
+                      <option value="townhouse">Townhouse</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',marginBottom:'3px'}}>TIMEFRAME</label>
+                    <select value={buyerBrief.timeframe}
+                      onChange={e => setBuyerBrief({...buyerBrief,timeframe:e.target.value})}
+                      style={{width:'100%',background:'var(--bg-base)',border:'1px solid var(--border-subtle)',
+                        color:'var(--text-primary)',padding:'7px',borderRadius:'4px',fontSize:'11px'}}>
+                      <option value="">Unknown</option>
+                      <option value="asap">ASAP</option>
+                      <option value="1-3 months">1–3 months</option>
+                      <option value="3-6 months">3–6 months</option>
+                      <option value="6+ months">6+ months</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',marginBottom:'3px'}}>PRE-APPROVED?</label>
+                    <select value={buyerBrief.pre_approved}
+                      onChange={e => setBuyerBrief({...buyerBrief,pre_approved:e.target.value})}
+                      style={{width:'100%',background:'var(--bg-base)',border:'1px solid var(--border-subtle)',
+                        color:'var(--text-primary)',padding:'7px',borderRadius:'4px',fontSize:'11px'}}>
+                      <option value="">Unknown</option>
+                      <option value="yes">Yes ✓</option>
+                      <option value="no">No</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* AI Polish Brief */}
+                <div>
+                  <button type="button" onClick={handlePolishBrief} disabled={polishingBrief}
+                    style={{padding:'7px 14px',background:'rgba(168,85,247,0.15)',
+                      border:'1px solid rgba(168,85,247,0.4)',color:'#a855f7',borderRadius:'4px',
+                      cursor:'pointer',fontSize:'11px',fontWeight:'600',display:'flex',
+                      alignItems:'center',gap:'6px',opacity: polishingBrief ? 0.6 : 1}}>
+                    ✦ {polishingBrief ? 'Generating...' : 'Polish Brief with AI'}
+                  </button>
+                  {polishedBrief && (
+                    <div style={{marginTop:'8px',padding:'10px 12px',background:'rgba(168,85,247,0.08)',
+                      border:'1px solid rgba(168,85,247,0.3)',borderRadius:'4px',
+                      fontSize:'12px',color:'var(--text-primary)',lineHeight:'1.5',
+                      fontStyle:'italic'}}>
+                      "{polishedBrief}"
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Notes */}
+          <div>
+            <label style={{display:'block',color:'var(--text-muted)',fontSize:'10px',letterSpacing:'0.08em',marginBottom:'6px'}}>NOTES (optional)</label>
+            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
+              style={{width:'100%',boxSizing:'border-box',background:'var(--bg-raised)',border:'1px solid var(--border-subtle)',
+                color:'var(--text-primary)',padding:'9px 12px',borderRadius:'4px',fontSize:'12px',
+                resize:'vertical',fontFamily:'inherit'}} />
+          </div>
+
+          {/* Disclosure checkbox */}
+          <div style={{padding:'10px 14px',background:'rgba(200,169,110,0.05)',border:'1px solid var(--border-gold)',borderRadius:'4px'}}>
+            <label style={{display:'flex',alignItems:'flex-start',gap:'10px',cursor:'pointer',fontSize:'12px',color:'var(--text-primary)'}}>
+              <input type="checkbox" checked={disclosureSent} onChange={e => setDisclosureSent(e.target.checked)}
+                style={{marginTop:'2px',accentColor:'var(--gold)'}} />
+              <span>I have sent a disclosure SMS/email to <strong>{contact.name}</strong> advising I may receive a referral fee for this introduction.</span>
+            </label>
+          </div>
+
+          {error && <div style={{color:'#ef4444',fontSize:'12px',padding:'8px 12px',background:'rgba(239,68,68,0.08)',borderRadius:'4px'}}>{error}</div>}
+
+          <button type="submit" disabled={saving || partners.length === 0}
+            style={{padding:'11px',background: saving ? 'var(--bg-raised)' : 'var(--gold)',
+              color: saving ? 'var(--text-muted)' : '#000',border:'none',borderRadius:'4px',
+              fontWeight:'700',fontSize:'13px',letterSpacing:'0.05em',cursor: saving ? 'default' : 'pointer',
+              transition:'all 0.15s'}}>
+            {saving ? 'Saving...' : 'CONFIRM REFERRAL'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
 
 // ── Event Group (collapsible group within Just Sold / Just Listed) ──────────
 function EventGroup({ alert, token, accentColor, defaultExpanded }) {
