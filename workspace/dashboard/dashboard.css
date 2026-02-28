@@ -121,6 +121,7 @@ body::before {
   background: var(--bg-surface);
   border-right: var(--border-gold);
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   flex-shrink: 0;
 }
 
@@ -227,6 +228,7 @@ body::before {
 .main-content {
   flex: 1;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   display: flex;
   flex-direction: column;
 }
