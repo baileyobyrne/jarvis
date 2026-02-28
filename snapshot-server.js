@@ -2545,9 +2545,9 @@ app.patch('/api/market-events/:id', requireAuth, async (req, res) => {
 
     res.json({ ok: true, contactCount: topContacts.length });
 
-    // Trigger buyer matching async for listing events (after response sent)
-    if (newType === 'listing') {
-      setImmediate(async () => {
+    // Trigger buyer matching async for all event types (after response sent)
+    setImmediate(async () => {
+      if (newType === 'listing') {
         try {
           const effectiveBeds = beds !== undefined ? beds : existing.beds;
           const effectiveBaths = baths !== undefined ? baths : existing.baths;
@@ -2557,14 +2557,16 @@ app.patch('/api/market-events/:id', requireAuth, async (req, res) => {
           const matches = findMatchingBuyers({ address: normAddress, suburb: newSuburb || '', type: newType, beds: effectiveBeds, baths: effectiveBaths, cars: effectiveCars, property_type: effectivePt, price: effectivePrice, id });
           if (matches.length > 0) await notifyBuyerMatches(matches, normAddress, id);
         } catch (e) { console.warn('[buyer-match] patch event match failed:', e.message); }
-        // Also check active buyer referrals
+      }
+      // Also check active buyer referrals — fires for all event types (listing, sold, etc.)
+      try {
         const effectivePt2  = property_type !== undefined ? property_type : existing.property_type;
         const effectivePrice2 = price !== undefined ? price : existing.price;
         const effectiveBeds2  = beds !== undefined ? beds : existing.beds;
         const effectiveBaths2 = baths !== undefined ? baths : existing.baths;
         await notifyReferralBuyerMatches({ address: normAddress, suburb: newSuburb || '', type: newType, beds: effectiveBeds2, baths: effectiveBaths2, property_type: effectivePt2, price: effectivePrice2 });
-      });
-    }
+      } catch (e) { console.warn('[buyer-match] patch referral match failed:', e.message); }
+    });
   } catch (e) {
     console.error('[PATCH /api/market-events/:id]', e.message);
     res.status(500).json({ error: e.message });
