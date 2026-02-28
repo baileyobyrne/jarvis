@@ -1124,10 +1124,116 @@ app.patch('/api/plan/:contactId/outcome', requireAuth, (req, res) => {
   }
 });
 
+// POST /api/reminders/parse-nl — natural language → structured reminder data via Haiku
+app.post('/api/reminders/parse-nl', requireAuth, async (req, res) => {
+  try {
+    const { text, today } = req.body;
+    if (!text || !text.trim()) {
+      return res.status(400).json({ error: 'text is required' });
+    }
+
+    const todayStr = today || new Date().toLocaleString('en-AU', {
+      weekday: 'long', day: '2-digit', month: 'short',
+      year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+
+    const systemPrompt = `You are a real estate agent's scheduling assistant. Parse the user's natural language input into a structured reminder or task.
+
+Today is ${todayStr}.
+
+Return ONLY a JSON object — no markdown, no explanation, no code fences:
+{
+  "contact_name": string | null,
+  "contact_mobile": string | null,
+  "fire_at": "YYYY-MM-DDTHH:mm" | null,
+  "note": string,
+  "ical_title": string,
+  "priority": "high" | "normal" | "low",
+  "is_task": boolean
+}
+
+Rules:
+- is_task = true only when no specific date/time is mentioned; in that case fire_at = null
+- Resolve relative dates relative to today. If a date is mentioned but no time, default to 09:00.
+- "next [weekday]" means the next occurrence of that weekday strictly after today.
+- note: clean, concise, actionable. E.g. "Follow up re appraisal booking" not "remind me to..."
+- ical_title: if contact present use "Call: {contact_name} — {brief action}"; otherwise "Reminder: {brief action}". Maximum 50 chars.
+- priority: "high" if input contains urgent/ASAP/important/!! — "low" if someday/eventually/no rush — otherwise "normal"
+- contact_mobile: only if a phone number is explicitly stated in the input, otherwise null`;
+
+    const apiRes = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model:      'claude-haiku-4-5-20251001',
+        max_tokens: 256,
+        system:     systemPrompt,
+        messages:   [{ role: 'user', content: text.trim() }],
+      },
+      {
+        headers: {
+          'x-api-key':         process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type':      'application/json',
+        },
+        timeout: 15000,
+      }
+    );
+
+    const raw   = apiRes.data.content[0].text.trim();
+    const clean = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+    let parsed;
+    try {
+      parsed = JSON.parse(clean);
+    } catch (_) {
+      console.warn('[parse-nl] Haiku returned non-JSON:', raw.slice(0, 200));
+      return res.status(422).json({ error: 'Could not parse AI response — try rephrasing' });
+    }
+
+    // Sanitise output
+    const result = {
+      contact_name:   (parsed.contact_name  || '').trim() || null,
+      contact_mobile: (parsed.contact_mobile || '').trim() || null,
+      fire_at:        parsed.fire_at   || null,
+      note:           parsed.note      || text.trim(),
+      ical_title:     parsed.ical_title || parsed.note || text.trim(),
+      priority:       ['high', 'normal', 'low'].includes(parsed.priority) ? parsed.priority : 'normal',
+      is_task:        !!parsed.is_task,
+    };
+
+    // Fuzzy contact match — word overlap on name, threshold 50%
+    if (result.contact_name) {
+      const norm  = s => (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+      const words = s => norm(s).split(/\s+/).filter(w => w.length > 1);
+      const contacts = db.prepare(
+        'SELECT id, name, mobile FROM contacts WHERE name IS NOT NULL LIMIT 5000'
+      ).all();
+      let bestId = null, bestScore = 0, bestMobile = null;
+      for (const c of contacts) {
+        const cw    = new Set(words(c.name));
+        const qw    = words(result.contact_name);
+        if (!cw.size || !qw.length) continue;
+        const shared = qw.filter(w => cw.has(w)).length;
+        const score  = shared / Math.max(cw.size, qw.length);
+        if (score > bestScore) { bestScore = score; bestId = c.id; bestMobile = c.mobile; }
+      }
+      if (bestScore >= 0.5) {
+        result.contact_id     = bestId;
+        result.contact_mobile = result.contact_mobile || bestMobile || null;
+      }
+    }
+
+    res.json(result);
+  } catch (e) {
+    console.error('[POST /api/reminders/parse-nl]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/reminders
 app.post('/api/reminders', requireAuth, async (req, res) => {
   try {
-    const { contact_id, contact_name, contact_mobile, note, fire_at, duration_minutes, is_task, priority } = req.body;
+    const { contact_id, contact_name, contact_mobile, note, fire_at, duration_minutes, is_task, priority, ical_title } = req.body;
     const isTask = is_task ? 1 : 0;
     if (!contact_name || !note) return res.status(400).json({ error: 'contact_name and note are required' });
     if (!isTask && !fire_at) return res.status(400).json({ error: 'fire_at required for reminders (use is_task=true for tasks)' });
@@ -1146,6 +1252,7 @@ app.post('/api/reminders', requireAuth, async (req, res) => {
         note:             note || '',
         fire_at,
         duration_minutes: dur,
+        ical_title:       ical_title || null,
       }).then(uid => {
         if (uid) {
           db.prepare('UPDATE reminders SET calendar_event_uid = ? WHERE id = ?').run(uid, r.lastInsertRowid);
