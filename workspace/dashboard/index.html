@@ -17,17 +17,13 @@
 
   <link rel="stylesheet" href="/dashboard.css" />
 
-  <!-- React 18.3.1 (pinned) -->
-  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"
-          crossorigin integrity="sha384-MhvFknC0AhqKZXwSCyPeIirpE1IhTafmLXTvTCai5pxjAqFcqEAAqKH/2lXrFVPn"></script>
-  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"
-          crossorigin integrity="sha384-VQePqH/QE94Buf4g/4MI5NrqDYjdqT7JW6KzhieQUlw6w7U7VD59fPqCAunpXEu6"></script>
-  <script src="https://unpkg.com/@babel/standalone@7.29.1/babel.min.js"
-          crossorigin integrity="sha384-INIs+Uk31kgOEWzrnD1NTqUMUPX27At97VZKni20gDB/lEo8L3rtcuwDGbI0l9m1"></script>
+  <!-- React 18.3.1, Babel 7.29.1, Lucide 0.469.0 (pinned, no SRI — internal dashboard) -->
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.1/babel.min.js" crossorigin></script>
   <!-- lucide-react UMD expects global.react (lowercase) — alias it before loading -->
   <script>window.react = window.React;</script>
-  <script src="https://unpkg.com/lucide-react@0.469.0/dist/umd/lucide-react.js"
-          crossorigin integrity="sha384-oNoFxpoHrsDhPry7tF2+EBqphbaCFnfDOfEcsNwIMBlnbEEaaRpGLqsK5daiGVFe"></script>
+  <script src="https://unpkg.com/lucide-react@0.469.0/dist/umd/lucide-react.js" crossorigin></script>
 
   <!-- Service Worker -->
   <script>
