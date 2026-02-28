@@ -342,7 +342,7 @@ function AgendaWidget({ token }) {
       </div>
       {!collapsed && (
         <div className="agenda-body">
-          {items.length === 0 && !agenda && <div className="agenda-empty">Loading\u2026</div>}
+          {items.length === 0 && !agenda && <div className="agenda-empty">Loading…</div>}
           {items.length === 0 && agenda && <div className="agenda-empty">No agenda items today</div>}
           {items.map(item => (
             <div key={item.key} className={`agenda-item${checked[item.key] ? ' agenda-item--done' : ''}`}>
@@ -364,7 +364,7 @@ function AgendaWidget({ token }) {
             <input
               className="agenda-add-input"
               type="text"
-              placeholder="Add task\u2026"
+              placeholder="Add task…"
               value={newItem}
               onChange={e => setNewItem(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && addManual()}
@@ -731,7 +731,7 @@ function ContactCard({ contact, token, onLogged, context, eventAddress, autoExpa
             <textarea
               className="outcome-note-input"
               rows={2}
-              placeholder="Additional note (optional)\u2026"
+              placeholder="Additional note (optional)…"
               value={userNote}
               onChange={e => setUserNote(e.target.value)}
             />
@@ -759,12 +759,12 @@ function ContactCard({ contact, token, onLogged, context, eventAddress, autoExpa
             ))}
           </div>
           <input className="followup-note-input" type="text"
-            placeholder="Follow-up note (optional)\u2026"
+            placeholder="Follow-up note (optional)…"
             value={followUpNote} onChange={e => setFollowUpNote(e.target.value)} />
           <div className="followup-actions">
             <button className="followup-skip" onClick={() => setShowFollowUp(false)}>Skip</button>
             <button className="followup-save" onClick={saveFollowUp} disabled={savingFollowUp}>
-              {savingFollowUp ? 'Saving\u2026' : 'Save Follow-up'}
+              {savingFollowUp ? 'Saving…' : 'Save Follow-up'}
             </button>
           </div>
         </div>
@@ -894,7 +894,7 @@ function EditContactModal({ contact, token, onSaved, onClose }) {
         <div className="modal-footer">
           <button className="modal-btn modal-btn--cancel" onClick={onClose}>Cancel</button>
           <button className="modal-btn modal-btn--save" onClick={handleSave} disabled={saving}>
-            {saving ? 'Saving\u2026' : 'Save'}
+            {saving ? 'Saving…' : 'Save'}
           </button>
         </div>
       </div>
@@ -968,7 +968,7 @@ function NewContactModal({ token, onCreated, onClose }) {
         <div className="modal-footer">
           <button className="modal-btn modal-btn--cancel" onClick={onClose}>Cancel</button>
           <button className="modal-btn modal-btn--save" onClick={handleSave} disabled={saving}>
-            {saving ? 'Saving\u2026' : 'Add Contact'}
+            {saving ? 'Saving…' : 'Add Contact'}
           </button>
         </div>
       </div>
@@ -1060,7 +1060,7 @@ function ContactNotesModal({ contact, token, onClose, prefilledNote = '' }) {
         <div className="modal-body">
 
           <div className="notes-add-section">
-            <textarea className="notes-textarea" placeholder="Add a note\u2026"
+            <textarea className="notes-textarea" placeholder="Add a note…"
               value={noteText} onChange={e => setNoteText(e.target.value)} rows={3} />
             <div className="notes-add-actions">
               <button className="notes-btn-reminder-toggle"
@@ -1069,7 +1069,7 @@ function ContactNotesModal({ contact, token, onClose, prefilledNote = '' }) {
               </button>
               <button className="modal-btn modal-btn--save"
                 onClick={handleSaveNote} disabled={saving || !noteText.trim()}>
-                {saving ? 'Saving\u2026' : 'Save Note'}
+                {saving ? 'Saving…' : 'Save Note'}
               </button>
             </div>
           </div>
@@ -1093,12 +1093,12 @@ function ContactNotesModal({ contact, token, onClose, prefilledNote = '' }) {
                 ))}
               </div>
               <input className="followup-note-input" type="text"
-                placeholder="Reminder note (optional)\u2026"
+                placeholder="Reminder note (optional)…"
                 value={remNote} onChange={e => setRemNote(e.target.value)} />
               <div className="followup-actions">
                 <button className="followup-skip" onClick={() => setShowReminder(false)}>Cancel</button>
                 <button className="followup-save" onClick={handleSaveReminder} disabled={savingRem}>
-                  {savingRem ? 'Saving\u2026' : 'Save Reminder'}
+                  {savingRem ? 'Saving…' : 'Save Reminder'}
                 </button>
               </div>
             </div>
@@ -1107,7 +1107,7 @@ function ContactNotesModal({ contact, token, onClose, prefilledNote = '' }) {
           {remSaved && <div className="notes-reminder-saved"><Check size={11} /> Reminder saved</div>}
 
           <div className="notes-timeline">
-            {loading && <div className="notes-loading">Loading\u2026</div>}
+            {loading && <div className="notes-loading">Loading…</div>}
             {!loading && timeline.length === 0 && (
               <div className="notes-empty">No notes or calls yet.</div>
             )}
@@ -2491,7 +2491,7 @@ function AddEditReminderModal({ token, reminder, defaultIsTask, onSaved, onClose
     setError('');
     const body = {
       note: note.trim(),
-      contact_name: contactName.trim() || 'Manual Task',
+      contact_name: contactName.trim() || null,
       contact_mobile: contactMobile.trim() || null,
       fire_at: isTask ? (fireAt || undefined) : fireAt,
       is_task: isTask ? 1 : 0,
@@ -3047,7 +3047,7 @@ function AddEditContactModal({ token, contact, onClose, onSaved }) {
         <div className="modal-footer">
           <button className="modal-btn modal-btn--cancel" onClick={onClose}>Cancel</button>
           <button className="modal-btn modal-btn--save" onClick={handleSave} disabled={saving}>
-            {saving ? 'Saving\u2026' : (isEdit ? 'Save' : 'Add Contact')}
+            {saving ? 'Saving…' : (isEdit ? 'Save' : 'Add Contact')}
           </button>
         </div>
       </div>
