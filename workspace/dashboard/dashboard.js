@@ -3763,6 +3763,7 @@ function Sidebar({ page, onNav, remainingCount, reminderCount, mobileOpen }) {
     { id: 'calls', label: 'Calls', Icon: Phone, badge: remainingCount > 0 ? remainingCount : null },
     { id: 'market', label: 'Market', Icon: TrendingUp },
     { id: 'buyers', label: 'Buyers', Icon: Users },
+    { id: 'referrals', label: 'Referrals', Icon: Star },
     { id: 'reminders', label: 'Reminders', Icon: Bell, badge: reminderCount > 0 ? reminderCount : null },
     { id: 'contacts', label: 'Contacts', Icon: Users },
     { id: 'history', label: 'History', Icon: History }
@@ -3801,6 +3802,7 @@ function MobileHeader({ page, onMenuClick }) {
     calls: 'Calls',
     market: 'Market',
     buyers: 'Buyers',
+    referrals: 'Referrals',
     reminders: 'Reminders',
     contacts: 'Contacts',
     history: 'History'
@@ -3826,7 +3828,7 @@ function BottomTabBar({ page, onNav }) {
   const tabs = [
     { id: 'calls', label: 'Calls', Icon: Phone },
     { id: 'market', label: 'Market', Icon: TrendingUp },
-    { id: 'contacts', label: 'Contacts', Icon: Users },
+    { id: 'referrals', label: 'Referrals', Icon: Star },
     { id: 'buyers', label: 'Buyers', Icon: Users },
     { id: 'reminders', label: 'Remind', Icon: Bell },
     { id: 'history', label: 'History', Icon: History }
@@ -3977,6 +3979,570 @@ function JarvisChat({ token }) {
   );
 }
 
+// ── Referrals Pipeline Page ────────────────────────────────────────────────
+const REFERRAL_STATUSES = ['referred', 'introduced', 'active', 'settled', 'paid'];
+const REFERRAL_STATUS_COLORS = {
+  referred:   'var(--text-muted)',
+  introduced: 'var(--gold)',
+  active:     '#3b82f6',
+  settled:    '#22c55e',
+  paid:       '#a855f7',
+};
+const PARTNER_TYPE_LABELS = {
+  selling_agent:   'Selling Agent',
+  buyers_agent:    'Buyers Agent',
+  mortgage_broker: 'Mortgage Broker',
+};
+const PARTNER_TYPE_COLORS = {
+  selling_agent:   'var(--gold)',
+  buyers_agent:    '#3b82f6',
+  mortgage_broker: '#22c55e',
+};
+
+function parseBuyerBrief(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch (_) { return null; }
+}
+
+function formatFee(v) {
+  if (v == null || v === '') return '—';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  return '$' + n.toLocaleString('en-AU', { maximumFractionDigits: 0 });
+}
+
+function daysSince(dateStr) {
+  if (!dateStr) return null;
+  return Math.floor((Date.now() - new Date(dateStr)) / 86400000);
+}
+
+// ── Revenue Summary Cards ───────────────────────────────────────────────────
+function ReferralMetricCard({ label, value, color, sub }) {
+  return (
+    <div style={{
+      background: 'var(--bg-raised)',
+      border: '1px solid var(--border-subtle)',
+      borderTop: `3px solid ${color}`,
+      borderRadius: 10,
+      padding: '20px 24px',
+      flex: 1,
+      minWidth: 0,
+      position: 'relative',
+      overflow: 'hidden',
+    }}>
+      <div style={{
+        position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+        background: `radial-gradient(ellipse at top left, ${color}08 0%, transparent 60%)`,
+        pointerEvents: 'none',
+      }} />
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.12em', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 10 }}>{label}</div>
+      <div style={{ fontSize: 30, fontWeight: 700, color, fontFamily: 'var(--font-mono)', letterSpacing: '-0.02em', lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{sub}</div>}
+    </div>
+  );
+}
+
+// ── Partner Row ─────────────────────────────────────────────────────────────
+function PartnerRow({ partner }) {
+  const color = PARTNER_TYPE_COLORS[partner.type] || 'var(--text-muted)';
+  const feeStr = partner.fee_value
+    ? (partner.fee_type === '%' ? `${partner.fee_value}%` : formatFee(partner.fee_value))
+    : '—';
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 12,
+      padding: '10px 14px',
+      borderBottom: '1px solid var(--border-subtle)',
+    }}>
+      <div style={{
+        width: 32, height: 32, borderRadius: '50%', background: `${color}20`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        <Building2 size={14} style={{ color }} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{partner.name}</div>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+          <span style={{ color, marginRight: 8 }}>{PARTNER_TYPE_LABELS[partner.type] || partner.type}</span>
+          {partner.suburb_focus && <span style={{ marginRight: 8 }}>{partner.suburb_focus}</span>}
+        </div>
+      </div>
+      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--gold)' }}>{feeStr}</div>
+        {partner.mobile && (
+          <a href={`tel:${partner.mobile}`} style={{ fontSize: 10, color: 'var(--text-muted)', textDecoration: 'none', fontFamily: 'var(--font-mono)' }}>{partner.mobile}</a>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Referral Card ───────────────────────────────────────────────────────────
+function ReferralCard({ referral, onStatusChange }) {
+  const [updating, setUpdating] = useState(false);
+  const days = daysSince(referral.referred_at);
+  const brief = parseBuyerBrief(referral.buyer_brief);
+  const partnerColor = PARTNER_TYPE_COLORS[referral.partner_type] || 'var(--text-muted)';
+
+  const handleStatus = async (e) => {
+    const newStatus = e.target.value;
+    if (newStatus === referral.status) return;
+    setUpdating(true);
+    try {
+      // token not accessible here — use parent callback pattern
+      await onStatusChange(referral.id, newStatus);
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  return (
+    <div style={{
+      background: 'var(--bg-surface)',
+      border: '1px solid var(--border-subtle)',
+      borderRadius: 8,
+      padding: '12px 14px',
+      marginBottom: 8,
+      transition: 'border-color 0.15s',
+      opacity: updating ? 0.6 : 1,
+    }}
+      onMouseEnter={e => e.currentTarget.style.borderColor = 'rgba(200,169,110,0.25)'}
+      onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--border-subtle)'}
+    >
+      {/* Header row */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontWeight: 700, color: 'var(--text-primary)', fontSize: 13, lineHeight: 1.3 }}>
+            {referral.contact_name || 'Unknown Contact'}
+          </div>
+          {referral.contact_address && (
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {referral.contact_address}
+            </div>
+          )}
+        </div>
+        {days !== null && (
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-muted)', flexShrink: 0, marginLeft: 8, paddingTop: 2 }}>
+            {days}d ago
+          </div>
+        )}
+      </div>
+
+      {/* Partner badge */}
+      {referral.partner_name && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          <span style={{
+            fontSize: 10, fontFamily: 'var(--font-mono)', letterSpacing: '0.08em',
+            background: `${partnerColor}18`, color: partnerColor,
+            border: `1px solid ${partnerColor}40`,
+            borderRadius: 4, padding: '2px 7px',
+          }}>
+            {PARTNER_TYPE_LABELS[referral.partner_type] || referral.partner_type}
+          </span>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{referral.partner_name}</span>
+        </div>
+      )}
+
+      {/* Buyer brief info row */}
+      {brief && (referral.type === 'buyer' || brief.budget_min || brief.budget_max || brief.suburbs) && (
+        <div style={{
+          background: '#3b82f610',
+          border: '1px solid #3b82f630',
+          borderRadius: 5,
+          padding: '6px 10px',
+          marginBottom: 8,
+          fontSize: 11,
+          color: '#93c5fd',
+          fontFamily: 'var(--font-mono)',
+        }}>
+          {(brief.budget_min || brief.budget_max) && (
+            <span style={{ marginRight: 10 }}>
+              {brief.budget_min ? formatFee(brief.budget_min) : '?'}
+              {' – '}
+              {brief.budget_max ? formatFee(brief.budget_max) : '?'}
+            </span>
+          )}
+          {brief.suburbs && (
+            <span style={{ marginRight: 10, color: '#bfdbfe' }}>
+              {Array.isArray(brief.suburbs) ? brief.suburbs.join(', ') : brief.suburbs}
+            </span>
+          )}
+          {brief.pre_approved && (
+            <span style={{ color: '#22c55e', marginRight: 10 }}>Pre-approved ✓</span>
+          )}
+          {brief.ai_brief && (
+            <span style={{
+              background: '#a855f720', color: '#d8b4fe',
+              border: '1px solid #a855f740',
+              borderRadius: 3, padding: '1px 5px', fontSize: 10,
+              verticalAlign: 'middle',
+            }}>AI Brief ✓</span>
+          )}
+        </div>
+      )}
+
+      {/* Fee + status */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        {referral.expected_fee ? (
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--gold)', fontWeight: 600 }}>
+            {formatFee(referral.expected_fee)}
+          </div>
+        ) : <div />}
+
+        <select
+          value={referral.status}
+          onChange={handleStatus}
+          disabled={updating}
+          style={{
+            background: 'var(--bg-base)',
+            color: REFERRAL_STATUS_COLORS[referral.status] || 'var(--text-primary)',
+            border: `1px solid ${REFERRAL_STATUS_COLORS[referral.status] || 'var(--border-subtle)'}50`,
+            borderRadius: 4,
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            letterSpacing: '0.08em',
+            padding: '3px 8px',
+            cursor: 'pointer',
+            textTransform: 'uppercase',
+            outline: 'none',
+          }}
+        >
+          {REFERRAL_STATUSES.map(s => (
+            <option key={s} value={s}>{s.toUpperCase()}</option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
+// ── Kanban Column ───────────────────────────────────────────────────────────
+function KanbanColumn({ status, referrals, onStatusChange }) {
+  const color = REFERRAL_STATUS_COLORS[status];
+  const isMobile = window.innerWidth < 768;
+
+  return (
+    <div style={{
+      flex: isMobile ? 'none' : 1,
+      minWidth: isMobile ? 'none' : 0,
+      display: 'flex',
+      flexDirection: 'column',
+    }}>
+      {/* Column header */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: isMobile ? '16px 0 8px' : '0 0 10px',
+        borderBottom: `2px solid ${color}40`,
+        marginBottom: 12,
+      }}>
+        <div style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0 }} />
+        <span style={{
+          fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700,
+          letterSpacing: '0.12em', color, textTransform: 'uppercase',
+        }}>
+          {status}
+        </span>
+        <span style={{
+          marginLeft: 'auto',
+          background: `${color}20`, color,
+          borderRadius: 10, fontSize: 10,
+          fontFamily: 'var(--font-mono)',
+          padding: '2px 8px', fontWeight: 700,
+        }}>
+          {referrals.length}
+        </span>
+      </div>
+
+      {/* Cards */}
+      <div style={{ flex: 1 }}>
+        {referrals.length === 0 ? (
+          <div style={{
+            textAlign: 'center', padding: '24px 12px',
+            color: 'var(--text-muted)', fontSize: 11,
+            fontFamily: 'var(--font-mono)',
+            border: '1px dashed var(--border-subtle)',
+            borderRadius: 8,
+          }}>
+            No {status} referrals
+          </div>
+        ) : (
+          referrals.map(r => (
+            <ReferralCard key={r.id} referral={r} onStatusChange={onStatusChange} />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Add Partner Form ────────────────────────────────────────────────────────
+function AddPartnerForm({ token, onAdded }) {
+  const [form, setForm] = useState({ name: '', type: 'selling_agent', fee_type: '%', fee_value: '', suburb_focus: '', mobile: '' });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const submit = async () => {
+    if (!form.name.trim()) { setErr('Name is required'); return; }
+    setSaving(true); setErr('');
+    try {
+      const res = await apiFetch('/api/partners', token, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: form.name.trim(),
+          type: form.type,
+          fee_type: form.fee_type,
+          fee_value: form.fee_value ? parseFloat(form.fee_value) : null,
+          suburb_focus: form.suburb_focus.trim() || null,
+          mobile: form.mobile.trim() || null,
+        }),
+      });
+      if (!res.ok) { const d = await res.json(); setErr(d.error || 'Failed'); return; }
+      setForm({ name: '', type: 'selling_agent', fee_type: '%', fee_value: '', suburb_focus: '', mobile: '' });
+      onAdded();
+    } catch (e) { setErr(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const inputStyle = {
+    background: 'var(--bg-base)',
+    border: '1px solid var(--border-subtle)',
+    borderRadius: 5,
+    color: 'var(--text-primary)',
+    fontFamily: 'var(--font-mono)',
+    fontSize: 12,
+    padding: '7px 10px',
+    outline: 'none',
+    width: '100%',
+    boxSizing: 'border-box',
+  };
+  const labelStyle = { fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4, display: 'block' };
+
+  return (
+    <div style={{ paddingTop: 16, borderTop: '1px solid var(--border-subtle)', marginTop: 8 }}>
+      <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--gold)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 14 }}>Add Partner</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+        <div>
+          <label style={labelStyle}>Name *</label>
+          <input style={inputStyle} value={form.name} onChange={e => set('name', e.target.value)} placeholder="Partner name" />
+        </div>
+        <div>
+          <label style={labelStyle}>Type</label>
+          <select style={inputStyle} value={form.type} onChange={e => set('type', e.target.value)}>
+            <option value="selling_agent">Selling Agent</option>
+            <option value="buyers_agent">Buyers Agent</option>
+            <option value="mortgage_broker">Mortgage Broker</option>
+          </select>
+        </div>
+        <div>
+          <label style={labelStyle}>Fee</label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <select style={{ ...inputStyle, width: 54, flexShrink: 0 }} value={form.fee_type} onChange={e => set('fee_type', e.target.value)}>
+              <option value="%">%</option>
+              <option value="$">$</option>
+            </select>
+            <input style={{ ...inputStyle, flex: 1 }} type="number" value={form.fee_value} onChange={e => set('fee_value', e.target.value)} placeholder="0" min="0" />
+          </div>
+        </div>
+        <div>
+          <label style={labelStyle}>Suburb Focus</label>
+          <input style={inputStyle} value={form.suburb_focus} onChange={e => set('suburb_focus', e.target.value)} placeholder="e.g. Willoughby" />
+        </div>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <label style={labelStyle}>Mobile</label>
+          <input style={inputStyle} value={form.mobile} onChange={e => set('mobile', e.target.value)} placeholder="04XX XXX XXX" />
+        </div>
+      </div>
+      {err && <div style={{ color: '#F87171', fontSize: 11, fontFamily: 'var(--font-mono)', marginBottom: 8 }}>{err}</div>}
+      <button
+        onClick={submit}
+        disabled={saving}
+        style={{
+          background: 'transparent',
+          border: '1px solid var(--border-gold)',
+          color: 'var(--gold)',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          padding: '8px 20px',
+          borderRadius: 5,
+          cursor: 'pointer',
+          opacity: saving ? 0.5 : 1,
+        }}
+      >
+        {saving ? 'Adding…' : 'Add Partner'}
+      </button>
+    </div>
+  );
+}
+
+// ── Partners Panel ──────────────────────────────────────────────────────────
+function PartnersPanel({ token, partners, onRefresh }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div style={{
+      background: 'var(--bg-raised)',
+      border: '1px solid var(--border-subtle)',
+      borderRadius: 10,
+      marginBottom: 24,
+    }}>
+      {/* Toggle header */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '14px 18px',
+          background: 'transparent', border: 'none', cursor: 'pointer',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <Building2 size={14} style={{ color: 'var(--gold)' }} />
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700, letterSpacing: '0.08em', color: 'var(--text-primary)', textTransform: 'uppercase' }}>
+            Manage Partners
+          </span>
+          <span style={{
+            background: 'var(--gold-glow, rgba(200,169,110,0.12))', color: 'var(--gold)',
+            fontSize: 10, fontFamily: 'var(--font-mono)',
+            borderRadius: 8, padding: '2px 8px',
+          }}>
+            {partners.length}
+          </span>
+        </div>
+        {open ? <ChevronUp size={14} style={{ color: 'var(--text-muted)' }} /> : <ChevronDown size={14} style={{ color: 'var(--text-muted)' }} />}
+      </button>
+
+      {open && (
+        <div style={{ borderTop: '1px solid var(--border-subtle)', padding: '0 18px 18px' }}>
+          {/* Partner list */}
+          {partners.length === 0 ? (
+            <div style={{ padding: '16px 0', color: 'var(--text-muted)', fontSize: 12, fontFamily: 'var(--font-mono)', textAlign: 'center' }}>
+              No partners yet. Add one below.
+            </div>
+          ) : (
+            <div style={{ marginTop: 4 }}>
+              {partners.map(p => <PartnerRow key={p.id} partner={p} />)}
+            </div>
+          )}
+          <AddPartnerForm token={token} onAdded={onRefresh} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main ReferralsPage ──────────────────────────────────────────────────────
+function ReferralsPage({ token }) {
+  const [referrals, setReferrals] = useState([]);
+  const [partners, setPartners] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [rRes, pRes] = await Promise.all([
+        apiFetch('/api/referrals', token),
+        apiFetch('/api/partners', token),
+      ]);
+      if (rRes.ok) { const d = await rRes.json(); setReferrals(d.referrals || []); }
+      if (pRes.ok) { const d = await pRes.json(); setPartners(d.partners || []); }
+    } catch (_) {}
+    finally { setLoading(false); }
+  }, [token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleStatusChange = useCallback(async (id, newStatus) => {
+    try {
+      const res = await apiFetch(`/api/referrals/${id}`, token, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (res.ok) { await load(); }
+    } catch (_) {}
+  }, [token, load]);
+
+  // Revenue metrics
+  const paidReferrals   = referrals.filter(r => r.status === 'paid');
+  const activePipeline  = referrals.filter(r => r.status !== 'paid');
+  const pipelineValue   = activePipeline.reduce((s, r) => s + (parseFloat(r.expected_fee) || 0), 0);
+  const receivedValue   = paidReferrals.reduce((s, r) => s + (parseFloat(r.actual_fee) || parseFloat(r.expected_fee) || 0), 0);
+
+  // Kanban buckets
+  const byStatus = {};
+  for (const s of REFERRAL_STATUSES) {
+    byStatus[s] = referrals.filter(r => r.status === s);
+  }
+
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 200, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+        Loading pipeline…
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding: isMobile ? '0 0 80px' : '0 0 40px' }}>
+
+      {/* ── Section 1: Revenue Summary ─────────────────────────────────── */}
+      <div style={{ display: 'flex', gap: 14, marginBottom: 24, flexWrap: 'wrap' }}>
+        <ReferralMetricCard
+          label="Active Pipeline"
+          value={pipelineValue > 0 ? '$' + pipelineValue.toLocaleString('en-AU', { maximumFractionDigits: 0 }) : '$0'}
+          color="var(--gold)"
+          sub={`${activePipeline.length} active referral${activePipeline.length !== 1 ? 's' : ''}`}
+        />
+        <ReferralMetricCard
+          label="Received"
+          value={receivedValue > 0 ? '$' + receivedValue.toLocaleString('en-AU', { maximumFractionDigits: 0 }) : '$0'}
+          color="#22c55e"
+          sub={`${paidReferrals.length} settled & paid`}
+        />
+        <ReferralMetricCard
+          label="Total Referrals"
+          value={referrals.length}
+          color="var(--text-primary)"
+          sub={partners.length + ` partner${partners.length !== 1 ? 's' : ''}`}
+        />
+      </div>
+
+      {/* ── Section 2: Partners Panel ──────────────────────────────────── */}
+      <PartnersPanel token={token} partners={partners} onRefresh={load} />
+
+      {/* ── Section 3: Kanban Pipeline ─────────────────────────────────── */}
+      <div style={{
+        display: 'flex',
+        flexDirection: isMobile ? 'column' : 'row',
+        gap: isMobile ? 0 : 14,
+        alignItems: 'flex-start',
+      }}>
+        {REFERRAL_STATUSES.map(status => (
+          <KanbanColumn
+            key={status}
+            status={status}
+            referrals={byStatus[status]}
+            onStatusChange={handleStatusChange}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── App ────────────────────────────────────────────────────────────────────
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem('jarvis_token') || '');
@@ -4020,6 +4586,7 @@ function App() {
     calls: { title: 'Today\'s Calls', subtitle: 'DAILY INTELLIGENCE BRIEF' },
     market: { title: 'Market Events', subtitle: 'RECENT ACTIVITY — 14 DAYS' },
     buyers: { title: 'Buyer Profiles', subtitle: 'BUYER CRM — ACTIVE ENQUIRIES & MATCHES' },
+    referrals: { title: 'Referrals Pipeline', subtitle: 'PARTNER REFERRALS — REVENUE TRACKER' },
     reminders: { title: 'Reminders', subtitle: 'UPCOMING FOLLOW-UPS' },
     contacts: { title: 'Contacts', subtitle: 'CRM + PRICEFINDER — CONTACTS & PROPERTIES' },
     history: { title: 'Call History', subtitle: 'TODAY\'S LOGGED OUTCOMES' }
@@ -4031,6 +4598,7 @@ function App() {
       case 'calls':     return <CallsPage token={token} onReminderCountChange={setReminderCount} />;
       case 'market':    return <MarketPage token={token} />;
       case 'buyers':    return <BuyersPage token={token} />;
+      case 'referrals': return <ReferralsPage token={token} />;
       case 'reminders': return <RemindersPage token={token} onReminderCountChange={setReminderCount} />;
       case 'contacts':  return <SearchPage token={token} />;
       case 'history':   return <HistoryPage token={token} />;
