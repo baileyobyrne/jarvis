@@ -1203,7 +1203,7 @@ Rules:
     };
 
     // Fuzzy contact match — word overlap on name, threshold 50%
-    if (result.contact_name) {
+    if (result.contact_name && result.contact_name !== 'Manual Task') {
       const norm  = s => (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
       const words = s => norm(s).split(/\s+/).filter(w => w.length > 1);
       const contacts = db.prepare(
