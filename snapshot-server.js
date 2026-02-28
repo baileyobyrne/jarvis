@@ -1127,15 +1127,15 @@ app.patch('/api/plan/:contactId/outcome', requireAuth, (req, res) => {
 // POST /api/reminders
 app.post('/api/reminders', requireAuth, async (req, res) => {
   try {
-    const { contact_id, contact_name, contact_mobile, note, fire_at, duration_minutes, is_task } = req.body;
+    const { contact_id, contact_name, contact_mobile, note, fire_at, duration_minutes, is_task, priority } = req.body;
     const isTask = is_task ? 1 : 0;
     if (!contact_name || !note) return res.status(400).json({ error: 'contact_name and note are required' });
     if (!isTask && !fire_at) return res.status(400).json({ error: 'fire_at required for reminders (use is_task=true for tasks)' });
     const dur = duration_minutes ? parseInt(duration_minutes, 10) : 30;
     const r = db.prepare(`
-      INSERT INTO reminders (contact_id, contact_name, contact_mobile, note, fire_at, duration_minutes, is_task)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(contact_id || null, contact_name, contact_mobile || null, note, fire_at || null, dur, isTask);
+      INSERT INTO reminders (contact_id, contact_name, contact_mobile, note, fire_at, duration_minutes, is_task, priority)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(contact_id || null, contact_name, contact_mobile || null, note, fire_at || null, dur, isTask, priority || 'normal');
 
     // iCloud CalDAV sync — skip for tasks or when no fire_at
     if (!isTask && fire_at) {
@@ -1211,7 +1211,7 @@ app.patch('/api/reminders/:id', requireAuth, (req, res) => {
     if (finalIsTask === 0 && !finalFireAt) {
       return res.status(400).json({ error: 'A reminder (non-task) must have a fire_at date.' });
     }
-    const ALLOWED = ['note', 'fire_at', 'contact_name', 'contact_mobile', 'is_task'];
+    const ALLOWED = ['note', 'fire_at', 'contact_name', 'contact_mobile', 'is_task', 'priority'];
     const sets = [], vals = [];
     for (const key of ALLOWED) {
       if (req.body[key] !== undefined) {
