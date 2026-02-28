@@ -1,13 +1,14 @@
 require('dotenv').config({ path: '/root/.openclaw/.env', override: true });
-const express = require('express');
-const fs      = require('fs');
-const path    = require('path');
-const https   = require('https');
-const http    = require('http');
+const express   = require('express');
+const fs        = require('fs');
+const path      = require('path');
+const https     = require('https');
+const http      = require('http');
 const { spawn } = require('child_process');
-const { db }  = require('./lib/db.js');
-const multer  = require('multer');
-const axios   = require('axios');
+const { db }    = require('./lib/db.js');
+const multer    = require('multer');
+const axios     = require('axios');
+const rateLimit = require('express-rate-limit');
 const { createCalendarEvent, fetchTodayEvents } = require('./lib/ical-calendar.js');
 const upload  = multer({ dest: '/root/.openclaw/workspace/intel/' });
 
@@ -27,6 +28,26 @@ if (!DASHBOARD_PASSWORD) {
 // ─── Body parsers ─────────────────────────────────────────────────────────────
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+
+// ─── Rate limiting ────────────────────────────────────────────────────────────
+// General: 300 req / 15 min per IP (plenty for normal use)
+app.use('/api/', rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests' },
+}));
+// Auth: 10 failed attempts / 15 min per IP — only fires on 401 responses
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  skipSuccessfulRequests: true,   // only counts failed (non-2xx) requests
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many failed attempts — try again in 15 minutes' },
+});
+app.use('/api/', authLimiter);
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 const CONTACTS_FILE  = '/root/.openclaw/workspace/willoughby-contacts.json';
