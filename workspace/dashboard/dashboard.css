@@ -2989,6 +2989,75 @@ body::before {
 .week-day-dots { display: flex; gap: 3px; min-height: 8px; align-items: center; }
 .week-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--gold); opacity: 0.7; }
 
+/* ── Quick Add Bar ───────────────────────────────────────────────────────── */
+.quick-add-bar {
+  margin-bottom: 16px;
+}
+.quick-add-inner {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.quick-add-input {
+  flex: 1;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
+  min-height: 44px;
+}
+.quick-add-input:focus {
+  border-color: var(--gold-border);
+}
+.quick-add-input::placeholder {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.quick-add-input:disabled {
+  opacity: 0.6;
+}
+.quick-add-btn {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  background: var(--bg-raised);
+  border: 1px solid var(--gold-border);
+  border-radius: 8px;
+  color: var(--gold);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, opacity 0.15s;
+}
+.quick-add-btn:hover:not(:disabled) {
+  background: rgba(200,169,110,0.12);
+}
+.quick-add-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.quick-add-btn--loading {
+  border-color: var(--border-subtle);
+  color: var(--text-muted);
+}
+.quick-add-error {
+  font-size: 11px;
+  color: #ef4444;
+  margin-top: 6px;
+  padding-left: 2px;
+}
+
+@media (max-width: 768px) {
+  .quick-add-input { font-size: 14px; padding: 12px 14px; }
+  .quick-add-input::placeholder { font-size: 12px; }
+}
+
 .reminders-toolbar {
   display: flex;
   align-items: center;
