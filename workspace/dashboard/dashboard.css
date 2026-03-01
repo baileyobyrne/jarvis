@@ -2804,6 +2804,33 @@ body::before {
   box-shadow: 0 8px 32px rgba(0,0,0,0.6);
 }
 .modal-box--notes { width: 420px; }
+
+/* ── Reminder Detail Modal ───────────────────────────────────────────────── */
+.rem-detail-modal { max-height: 90vh; overflow-y: auto; }
+.rem-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.rem-detail-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rem-detail-date { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
+.rem-detail-note {
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.5;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: var(--border-subtle);
+}
+.rem-detail-contact-section { min-height: 40px; }
+.rem-detail-no-contact {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  padding: 12px 0;
+}
+
 .modal-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 14px 10px; border-bottom: 1px solid #2a2a2a;

@@ -2750,6 +2750,81 @@ function QuickAddBar({ token, onParsed }) {
   );
 }
 
+// ── Reminder Detail Modal ─────────────────────────────────────────────────────
+function ReminderDetailModal({ reminder, token, onClose }) {
+  const [contact, setContact] = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error,   setError]   = React.useState(null);
+
+  React.useEffect(() => {
+    if (!reminder.contact_id) return;
+    setLoading(true);
+    apiFetch(`/api/contacts/${reminder.contact_id}`, token)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('Not found')))
+      .then(data => { setContact(data.contact); setLoading(false); })
+      .catch(e => { setError(e.message); setLoading(false); });
+  }, [reminder.contact_id, token]);
+
+  // Build a minimal contact stub from reminder data for immediate display
+  const stub = {
+    id:      reminder.contact_id || null,
+    name:    reminder.contact_name || 'Unknown Contact',
+    mobile:  reminder.contact_mobile || null,
+    address: null,
+    suburb:  null,
+  };
+  const displayContact = contact || stub;
+
+  const fmtFireAt = (ts) => {
+    if (!ts) return null;
+    const d = new Date(ts);
+    return d.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })
+      + ' ' + d.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box modal-box--wide rem-detail-modal" onClick={e => e.stopPropagation()}>
+        <div className="rem-detail-header">
+          <div className="rem-detail-meta">
+            {reminder.priority === 'high' && <span className="priority-badge">HIGH</span>}
+            {reminder.fire_at && (
+              <span className="rem-detail-date">{fmtFireAt(reminder.fire_at)}</span>
+            )}
+            {!reminder.fire_at && <span className="rem-detail-date" style={{ color: 'var(--text-muted)' }}>Task — no due date</span>}
+          </div>
+          <button className="icon-btn" onClick={onClose} style={{ marginLeft: 'auto' }}>
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="rem-detail-note">{reminder.note}</div>
+
+        <div className="rem-detail-contact-section">
+          {!reminder.contact_id && (
+            <div className="rem-detail-no-contact">No linked contact</div>
+          )}
+          {reminder.contact_id && loading && (
+            <div className="rem-detail-no-contact">Loading contact...</div>
+          )}
+          {reminder.contact_id && error && !contact && (
+            <div className="rem-detail-no-contact" style={{ color: 'var(--outcome-notint)' }}>
+              Could not load contact details
+            </div>
+          )}
+          {reminder.contact_id && displayContact && (
+            <ContactCard
+              contact={displayContact}
+              token={token}
+              context="search"
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RemindersPage({ token, onReminderCountChange }) {
   const [reminders, setReminders] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
