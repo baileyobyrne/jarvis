@@ -1,23 +1,47 @@
 # JARVIS: Real Estate Automation (Willoughby)
 Technical architecture for an autonomous real estate monitoring and prospecting engine.
 
+## ⚡ Quick Commands
+```bash
+# Service status / restart
+pm2 status
+pm2 logs jarvis-snapshot --lines 50
+pm2 restart jarvis-snapshot --update-env   # use --update-env when .env changed
+
+# Test API (run from Node — do not source .env in bash)
+node -e "
+  require('dotenv').config({path:'/root/.openclaw/.env',override:true});
+  const https=require('https'),a=process.env.DASHBOARD_PASSWORD;
+  const req=https.request({hostname:'localhost',port:4242,path:'/api/status',rejectUnauthorized:false,headers:{'Authorization':'Bearer '+a}},r=>{let b='';r.on('data',d=>b+=d);r.on('end',()=>console.log(b))});req.end();
+"
+
+# Run pipelines (from skills/agentbox-willoughby/)
+node monitor-email.js          # Pipeline A — reactive email scan
+node daily-planner.js          # Pipeline B — proactive daily plan
+
+# DB migrations — add column safely
+node -e "require('/root/.openclaw/lib/db.js'); /* db.prepare('ALTER TABLE t ADD COLUMN ...').run() */"
+```
+
 ## 🏗️ System Architecture: The Dual-Stream Pipeline
 1. **Pipeline A (Reactive):** `monitor-email.js`
-   - **Trigger:** Cron job 3× daily — approx. 7am, 12pm, 5pm AEDT (21:00, 02:00, 07:00 UTC). *(Previously documented as "every 15 minutes" — corrected to match `cron/jobs.json`.)*
-   - **Function:** Monitors Gmail for REA, Domain, and Homely alerts[cite: 1569, 2393]. Also parses CoreLogic/RP Data forwarded emails.
-   - **Logic:** Applies a 1.5km geofence and Haversine proximity scoring to AgentBox contacts[cite: 1569, 2394]. CoreLogic rentals write `occupancy: "Investor"` back to the shadow DB.
-   - **Output:** All email sources (CoreLogic, REA/Domain, Weekly Wrap, Proping) funnel through `processMarketEvent(details, rpMap, opts)` — the single save path. Steps: farm gate → score 20 contacts → write `market_events` → write `listing-alerts.json` (listing/sold only) → optional individual Telegram. CoreLogic and Proping skip individual Telegram (Proping sends a consolidated digest instead). `opts.sendTelegram = true` for REA/Domain/Weekly Wrap.
-   - **Call board vs Market data sources (CRITICAL):** `listing-alerts.json` is the ONLY data source for the Just Sold/Just Listed call board columns (`GET /api/alerts`). `market_events` SQLite feeds the Market page only. An event that only reaches `market_events` (without also writing `listing-alerts.json`) will appear in Market but NOT in the call board. Always use `processMarketEvent()` to guarantee both are written.
-   - **`processProping()` signature (updated 2026-02-28):** `processProping(events, receivedDate, testMode, rpMap = new Map())` — rpMap is now 4th param. Each Proping event now routes through `processMarketEvent()` for full contact scoring and `listing-alerts.json` write.
+ - **Trigger:** Cron job 3× daily — approx. 7am, 12pm, 5pm AEDT (21:00, 02:00, 07:00 UTC). *(Previously documented as "every 15 minutes" — corrected to match `cron/jobs.json`.)*
+ - **Function:** Monitors Gmail for REA, Domain, and Homely alerts. Also parses CoreLogic/RP Data forwarded emails.
+ - **Logic:** Applies a 1.5km geofence and Haversine proximity scoring to AgentBox contacts. CoreLogic rentals write `occupancy: "Investor"` back to the shadow DB.
+ - **Output:** All email sources (CoreLogic, REA/Domain, Weekly Wrap, Proping) funnel through `processMarketEvent(details, rpMap, opts)` — the single save path. Steps: farm gate → score 20 contacts → write `market_events` → write `listing-alerts.json` (listing/sold only) → optional individual Telegram. CoreLogic and Proping skip individual Telegram (Proping sends a consolidated digest instead). `opts.sendTelegram = true` for REA/Domain/Weekly Wrap.
+ - **Call board vs Market data sources (CRITICAL):** `listing-alerts.json` is the ONLY data source for the Just Sold/Just Listed call board columns (`GET /api/alerts`). `market_events` SQLite feeds the Market page only. An event that only reaches `market_events` (without also writing `listing-alerts.json`) will appear in Market but NOT in the call board. Always use `processMarketEvent()` to guarantee both are written.
+ - **`processProping()` signature (updated 2026-02-28):** `processProping(events, receivedDate, testMode, rpMap = new Map())` — rpMap is now 4th param. Each Proping event now routes through `processMarketEvent()` for full contact scoring and `listing-alerts.json` write.
 
 2. **Pipeline B (Proactive):** `daily-planner.js`
-   - **Trigger:** Cron job Mon–Fri at 7:00 AM AEDT[cite: 1599, 2397] (`0 20 * * 1-5` UTC).
-   - **Function:** Parses CoreLogic/RP Data CSVs and McGrath email forwards[cite: 1570, 2393].
-   - **Logic:** Calculates "Propensity to Sell" scores (Tenure > 7yrs = +20, past appraisals = +30, investor status = +15, Past Vendor = +25, Prospective Vendor = +15)[cite: 2398]. Score tiers: Prime ≥45, Warm 20–44, Cold <20. Distribution (3,327 contacts): prime=149, warm=406, low=1374, zero=1446. Syncs Notion contacted statuses → 180-day local cooldown. Local planned contacts get 90-day cooldown.
-   - **Output:** Writes scored contacts with Claude-generated talking points to **SQLite** (`daily_plans` + `contacts` tables). Board-full guard (30 slots) reads from SQLite `daily_plans` ✅.
+ - **Trigger:** Cron job Mon–Fri at 7:00 AM AEDT (`0 20 * * 1-5` UTC).
+ - **Function:** Parses CoreLogic/RP Data CSVs and McGrath email forwards.
+ - **Logic:** Calculates "Propensity to Sell" scores (Tenure > 7yrs = +20, past appraisals = +30, investor status = +15, Past Vendor = +25, Prospective Vendor = +15). Score tiers: Prime ≥45, Warm 20–44, Cold <20. Distribution (3,327 contacts): prime=149, warm=406, low=1374, zero=1446. Syncs Notion contacted statuses → 180-day local cooldown. Local planned contacts get 90-day cooldown.
+ - **Output:** Writes scored contacts with Claude-generated talking points to **SQLite** (`daily_plans` + `contacts` tables). Board-full guard (30 slots) reads from SQLite `daily_plans` ✅.
 
-## 📋 Notion Command Center Schema
-The pipeline writes to a single Notion database. Confirmed property schema:
+## 📋 Notion Command Center Schema *(Decommissioned — Historical Reference Only)*
+> Notion was replaced by the SQLite/Express dashboard in Feb 2026. Schema preserved for context.
+
+The pipeline wrote to a single Notion database. Confirmed property schema:
 
 | Property | Notion Type | Notes |
 |---|---|---|
@@ -32,8 +56,8 @@ The pipeline writes to a single Notion database. Confirmed property schema:
 
 Cooldown rules driven by Status: `🗣️ Connected`, `⏳ Left Message`, `🤝 Appraisal Booked`, `🚫 Not Interested` → 180-day lockout in `recently-planned.json`.
 
-## 🔄 Planned Migration: Notion → Custom Web Dashboard
-The Notion Command Center will be replaced by a self-hosted web dashboard on the VPS. Migration layers:
+## 🏠 Dashboard Architecture (Completed 2026-02-25)
+Migration from Notion to a self-hosted VPS dashboard is complete. Architecture layers:
 
 **1. Database — SQLite on VPS**
 - Single `contacts` table mirrors the Notion schema above
@@ -43,11 +67,11 @@ The Notion Command Center will be replaced by a self-hosted web dashboard on the
 
 **2. API — Express on VPS**
 - Write endpoints (replace `notion.pages.create` calls in both pipelines)
-  - `POST /api/contacts` — called by `daily-planner.js` and `monitor-email.js`
+ - `POST /api/contacts` — called by `daily-planner.js` and `monitor-email.js`
 - Read/update endpoints for the React frontend
-  - `GET /api/contacts?status=...` — fetch board columns
-  - `PATCH /api/contacts/:id/status` — update status (replaces Notion UI interaction)
-  - `GET /api/stats` — board counts for pre-flight check in `daily-planner.js`
+ - `GET /api/contacts?status=...` — fetch board columns
+ - `PATCH /api/contacts/:id/status` — update status (replaces Notion UI interaction)
+ - `GET /api/stats` — board counts for pre-flight check in `daily-planner.js`
 - Both pipeline scripts updated to `POST` to `http://localhost:{PORT}/api/contacts` instead of `notion.pages.create`
 
 **3. Frontend — React served by Express**
@@ -61,15 +85,15 @@ The Notion Command Center will be replaced by a self-hosted web dashboard on the
 
 ## 🛡️ Critical Safety Rules
 - **READ-ONLY CRM:** Never write automated data directly to AgentBox via API to avoid scraping bans.
-- **Shadow Database:** Query the local `willoughby-contacts.json` (67,316 contacts) instead of the live CRM[cite: 2392, 2398].
-- **Geocoding Hygiene:** Respect Nominatim rate limits (1.1s delay) and use `geo-cache.json` for geocoding[cite: 2346, 2347].
-- **API Tokens:** Use `../../.env` for all secrets — resolves to `/root/.openclaw/.env` (AgentBox, OpenAI, Anthropic, Telegram)[cite: 1209, 2388].
+- **Shadow Database:** Query the local `willoughby-contacts.json` (67,316 contacts) instead of the live CRM.
+- **Geocoding Hygiene:** Respect Nominatim rate limits (1.1s delay) and use `geo-cache.json` for geocoding.
+- **API Tokens:** Use `../../.env` for all secrets — resolves to `/root/.openclaw/.env` (AgentBox, OpenAI, Anthropic, Telegram).
 - **`snapshot-server.js`:** `DASHBOARD_PASSWORD` is loaded from `.env` via `process.env.DASHBOARD_PASSWORD` — startup guard refuses to start if missing. CLAUDE.md is intentionally excluded from `SNAPSHOT_FILES` to avoid bundling documentation. Server runs on HTTPS port 4242 at `72.62.74.105`.
 
 ## 📂 Workspace Topology
 - **Production Scripts:** `/root/.openclaw/skills/agentbox-willoughby/`
 - **Data Layer:** `/root/.openclaw/workspace/`
-- **Core Files:** `monitor-email.js`, `get-contacts.js`, `geo-utils.js`, `willoughby-contacts.json`[cite: 1567, 1585].
+- **Core Files:** `monitor-email.js`, `get-contacts.js`, `geo-utils.js`, `willoughby-contacts.json`.
 - **Cron Schedule:** `/root/.openclaw/cron/jobs.json`
 - **Snapshot Server:** `/root/.openclaw/snapshot-server.js` (PM2-managed, port 4242)
 - **DB initialisation & migrations:** `/root/.openclaw/lib/db.js` — `snapshot-server.js` delegates to this. Add new columns here using `try { db.prepare('ALTER TABLE t ADD COLUMN ...').run(); } catch (_) {}` pattern.
@@ -78,9 +102,9 @@ The Notion Command Center will be replaced by a self-hosted web dashboard on the
 - **API testing (curl):** `source /root/.openclaw/.env && curl -sk -X POST https://localhost:4242/api/... -H "Authorization: Bearer $DASHBOARD_PASSWORD" -H "Content-Type: application/json" -d '{...}'` — NOTE: `source /root/.openclaw/.env` fails in bash (non-bash content on line 8). Use Node.js `require('dotenv').config()` instead; never source .env directly in shell scripts.
 - **dotenv outside agentbox-willoughby dir:** use `require('/root/.openclaw/skills/agentbox-willoughby/node_modules/dotenv').config(...)` for scripts in `/tmp` or `/root/.openclaw/scripts/`.
 - **Background process watching:** `wait PID` only works for child PIDs of the current shell. Use `while kill -0 PID 2>/dev/null; do sleep 60; done` to watch an arbitrary PID from a different shell session.
-- **Test Pipeline A:** `node monitor-email.js` [cite: 2388]
-- **Test Pipeline B:** `node daily-planner.js` [cite: 1215]
-- **Update Database:** `node refetch-contacts-full.js` (uses Playwright session-interception)[cite: 1699, 2335].
+- **Test Pipeline A:** `node monitor-email.js` 
+- **Test Pipeline B:** `node daily-planner.js` 
+- **Update Database:** `node refetch-contacts-full.js` (uses Playwright session-interception).
 - **SQLite positional params:** `db.prepare(...).get(Array.from(set))` — NOT `.get(...Array.from(set))`. Spreading a Set/Array as rest args silently binds only the first value; pass a single array.
 - **Suburb filter discrepancy:** `workspace/backfill-contacts.js` covers 9 suburbs (core farm). `daily-planner.js` covers 12 (adds NORTHBRIDGE, LANE COVE, ST LEONARDS, CROWS NEST). Contacts from the extra 4 suburbs get minimal stubs in `contacts`, no RP enrichment.
 - **lucide-react CDN (index.html):** `lucide-react` UMD factory looks for `global.react` (lowercase). React CDN sets `window.React` (uppercase). Fix: add `<script>window.react = window.React;</script>` **before** the lucide-react script tag. Global destructure: `const { Phone, ... } = LucideReact;` (PascalCase).
@@ -110,7 +134,7 @@ The Notion Command Center will be replaced by a self-hosted web dashboard on the
 - **`PATCH /api/reminders/:id` ALLOWED list:** Dynamic SET builder at ~line 1322 in snapshot-server.js — `['note', 'fire_at', 'contact_name', 'contact_mobile', 'is_task', 'priority', 'duration_minutes']`. Add new editable reminder fields here or they are silently ignored.
 - **`createCalendarEvent` `ical_title` override:** `lib/ical-calendar.js` accepts `ical_title` in opts; if provided it is used directly as the iCal `summary`. Fallback builds: contact present → `"Call: {name} — {note40}"`, otherwise → `"Reminder: {note50}"` or `"Jarvis Reminder"`.
 - **`POST /api/reminders/parse-nl`:** Haiku NL parsing endpoint. Body: `{ text }`. Returns `{ contact_name, contact_mobile, contact_id?, fire_at, note, ical_title, priority, is_task }`. Fuzzy-matches contact name (≥50% word overlap). Must be registered BEFORE `POST /api/reminders` in route order.
-- **PWA service worker cache versioning:** `workspace/dashboard/sw.js` has `const CACHE = 'jarvis-v1'`. Bump this string (e.g. `jarvis-v2`) whenever deploying changes to `dashboard.js` or `dashboard.css`, or installed PWA users will serve stale cached files.
+- **PWA service worker cache versioning:** `workspace/dashboard/sw.js` has `const CACHE = 'jarvis-v7'`. Bump this string (e.g. `jarvis-v8`) whenever deploying changes to `dashboard.js` or `dashboard.css`, or installed PWA users will serve stale cached files.
 - **`reminder-bot.js` dispatch query:** Must include `AND is_task = 0` — tasks with a fire_at date would otherwise fire as "JARVIS REMINDER" Telegram messages.
 - **`buyer_profiles` table (added 2026-02-27):** Manual buyer CRM — 22 cols including price_min/max, beds_min/max, property_type, suburbs_wanted (comma-sep), timeframe, features, status (active/paused/purchased/archived), contact_id. `buyer_matches` table tracks which buyers were matched to which market events (partial unique index on buyer_id+market_event_id WHERE market_event_id IS NOT NULL).
 - **Buyer matching:** `findMatchingBuyers(event)` in snapshot-server.js — 4-dimension scoring (suburb 40, beds 30, property_type 20, price 25). `notifyBuyerMatches()` sends Telegram + creates reminders. Triggered via `setImmediate` after POST/PATCH market events. Endpoints: `GET/POST /api/buyer-profiles`, `GET/PATCH/DELETE /api/buyer-profiles/:id`, `POST /api/buyer-profiles/:id/log-call`, `GET /api/buyer-profiles/matches/recent`, `POST /api/buyer-profiles/match-event`.
