@@ -2765,16 +2765,6 @@ function ReminderDetailModal({ reminder, token, onClose }) {
       .catch(e => { setError(e.message); setLoading(false); });
   }, [reminder.contact_id, token]);
 
-  // Build a minimal contact stub from reminder data for immediate display
-  const stub = {
-    id:      reminder.contact_id || null,
-    name:    reminder.contact_name || 'Unknown Contact',
-    mobile:  reminder.contact_mobile || null,
-    address: null,
-    suburb:  null,
-  };
-  const displayContact = contact || stub;
-
   const fmtFireAt = (ts) => {
     if (!ts) return null;
     const d = new Date(ts);
@@ -2812,9 +2802,9 @@ function ReminderDetailModal({ reminder, token, onClose }) {
               Could not load contact details
             </div>
           )}
-          {reminder.contact_id && (contact || loading) && (
+          {reminder.contact_id && !loading && contact && (
             <ContactCard
-              contact={contact || stub}
+              contact={contact}
               token={token}
               context="search"
             />
