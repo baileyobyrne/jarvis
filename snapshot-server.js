@@ -3744,7 +3744,7 @@ Rules:
     'https://api.anthropic.com/v1/messages',
     {
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 512,
+      max_tokens: 800,
       system: systemPrompt,
       messages: [{ role: 'user', content: `Transcript:\n${transcript}` }],
     },
@@ -3760,7 +3760,11 @@ Rules:
 
   const raw = apiRes.data.content[0].text.trim();
   const clean = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-  return JSON.parse(clean);
+  try {
+    return JSON.parse(clean);
+  } catch (_) {
+    throw new Error(`Claude returned non-JSON: ${clean.slice(0, 200)}`);
+  }
 }
 
 // Full async pipeline: transcribe → analyse → auto-actions → telegram
@@ -3770,6 +3774,9 @@ async function processCallRecording(callId, audioFilePath, originalName, contact
     console.log(`[call-intel] Transcribing call ${callId}…`);
     const transcript = await transcribeAudio(audioFilePath, originalName);
     if (!transcript) throw new Error('Whisper returned empty transcript');
+
+    // Save transcript immediately so it's preserved even if analysis fails
+    db.prepare('UPDATE call_recordings SET transcript = ? WHERE id = ?').run(transcript, callId);
 
     // 2. Analyse with Claude
     console.log(`[call-intel] Analysing call ${callId}…`);
