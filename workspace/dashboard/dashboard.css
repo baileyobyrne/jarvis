@@ -1592,7 +1592,7 @@ body::before {
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  padding: 10px 12px;
+  padding: 10px 4px;
   cursor: pointer;
   color: var(--text-muted);
   font-size: 9px;
@@ -2768,14 +2768,14 @@ body::before {
 
 @media (max-width: 600px) {
   .jarvis-chat-panel {
-    bottom: 88px;
+    bottom: 144px;
     right: 12px;
     left: 12px;
     width: auto;
     max-width: none;
   }
   .jarvis-chat-fab-wrapper {
-    bottom: 16px;
+    bottom: 72px;
     right: 18px;
   }
 }

@@ -10,7 +10,7 @@ const {
   MapPin, Calendar, Check, X, AlertCircle, Home, Activity,
   MessageSquare, PhoneCall, PhoneOff, Star, RefreshCw,
   History, Menu, Building2, CheckCircle, Plus, Mail,
-  Search, Pencil, Trash2, Copy, Send, ClipboardList, FileEdit, Wand2
+  Search, Pencil, Trash2, Copy, Send, ClipboardList, FileEdit, Wand2, User
 } = LucideReact;
 
 // SMS link helper — opens iMessages on macOS
@@ -3942,13 +3942,14 @@ function MobileHeader({ page, onMenuClick }) {
 // ── Bottom Tab Bar ─────────────────────────────────────────────────────────
 function BottomTabBar({ page, onNav }) {
   const tabs = [
-    { id: 'calls', label: 'Calls', Icon: Phone },
-    { id: 'market', label: 'Market', Icon: TrendingUp },
-    { id: 'referrals', label: 'Referrals', Icon: Star },
-    { id: 'prospects', label: 'Prospects', Icon: Search },
-    { id: 'buyers', label: 'Buyers', Icon: Users },
-    { id: 'reminders', label: 'Remind', Icon: Bell },
-    { id: 'history', label: 'History', Icon: History }
+    { id: 'calls',     label: 'Calls',   Icon: Phone },
+    { id: 'market',    label: 'Market',  Icon: TrendingUp },
+    { id: 'referrals', label: 'Refer',   Icon: Star },
+    { id: 'prospects', label: 'Leads',   Icon: Search },
+    { id: 'buyers',    label: 'Buyers',  Icon: Users },
+    { id: 'contacts',  label: 'CRM',     Icon: User },
+    { id: 'reminders', label: 'Remind',  Icon: Bell },
+    { id: 'history',   label: 'History', Icon: History },
   ];
 
   return (
