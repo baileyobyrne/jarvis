@@ -2060,9 +2060,9 @@ function MarketPage({ token }) {
               style={{
                 padding: '4px 10px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
                 fontFamily: 'var(--font-mono)',
-                background: daysFilter === d ? 'var(--bg-raised)' : 'var(--bg-raised)',
-                color:      daysFilter === d ? 'var(--text)' : 'var(--text-muted)',
-                border:     `1px solid ${daysFilter === d ? 'var(--border-subtle)' : 'var(--border-subtle)'}`,
+                background: daysFilter === d ? 'rgba(200,169,110,0.12)' : 'var(--bg-raised)',
+                color:      daysFilter === d ? 'var(--gold)' : 'var(--text-muted)',
+                border:     `1px solid ${daysFilter === d ? 'var(--gold)' : 'var(--border-subtle)'}`,
                 transition: 'all 0.15s',
               }}
             >{d}d</button>
@@ -2874,6 +2874,7 @@ function RemindersPage({ token, onReminderCountChange }) {
     setShowAddModal(false);
     setEditTarget(null);
     setQuickValues(null);
+    setDetailTarget(null);
     load();
   }, [load]);
 
