@@ -1168,8 +1168,9 @@ function ReferModal({ contact, token, onClose, onSuccess }) {
 
   React.useEffect(() => {
     apiFetch('/api/partners', token).then(r => r.json()).then(data => {
-      setPartners(data);
-      if (data.length) setPartnerId(String(data[0].id));
+      const list = data.partners || data || [];
+      setPartners(list);
+      if (list.length) setPartnerId(String(list[0].id));
     }).catch(() => {});
     const cc = (contact.contact_class || contact.contactClass || '').toLowerCase();
     if (cc.includes('vendor')) setType('vendor');

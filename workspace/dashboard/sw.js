@@ -1,4 +1,4 @@
-const CACHE = 'jarvis-v8';
+const CACHE = 'jarvis-v9';
 const STATIC = ['/', '/dashboard.js', '/dashboard.css', '/manifest.json'];
 
 self.addEventListener('install', e => {
