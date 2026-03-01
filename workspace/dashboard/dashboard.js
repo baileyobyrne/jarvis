@@ -3439,7 +3439,12 @@ function SearchCard({ prop, token, onAddedToPlan, onDeleted, onEdited }) {
               fetch('http://localhost:5678/upcoming-call', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mobile: phone }),
+                body: JSON.stringify({
+                  contact_id: prop.crm_contact_id,
+                  name: prop.crm_name || prop.owner_name,
+                  mobile: phone,
+                  address: prop.address,
+                }),
               }).catch(() => {});
             }}
           >
@@ -4170,8 +4175,9 @@ function BottomTabBar({ page, onNav }) {
     { id: 'prospects', label: 'Leads',   Icon: Search },
     { id: 'buyers',    label: 'Buyers',  Icon: Users },
     { id: 'contacts',  label: 'CRM',     Icon: User },
-    { id: 'reminders', label: 'Remind',  Icon: Bell },
-    { id: 'history',   label: 'History', Icon: History },
+    { id: 'reminders',   label: 'Remind',  Icon: Bell },
+    { id: 'history',     label: 'History', Icon: History },
+    { id: 'recordings',  label: 'Rec',     Icon: Mic },
   ];
 
   return (

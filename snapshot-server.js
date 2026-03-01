@@ -3845,7 +3845,7 @@ async function processCallRecording(callId, audioFilePath, originalName, contact
         };
         const mappedOutcome = outcomeMap[outcome] || 'connected';
         db.prepare(`
-          UPDATE daily_plans SET outcome = ?, updated_at = datetime('now')
+          UPDATE daily_plans SET outcome = ?
           WHERE contact_id = ? AND plan_date = date('now') AND outcome IS NULL
         `).run(mappedOutcome, contactContext.contact_id);
       } catch (e) {
@@ -3908,7 +3908,7 @@ async function processCallRecording(callId, audioFilePath, originalName, contact
     }
     msg += `\n\n<a href="https://72.62.74.105:4242">View in Jarvis</a>`;
 
-    await sendTelegramMessage(msg);
+    sendTelegramMessage(msg).catch(e => console.warn('[call-intel] Telegram send failed:', e.message));
     console.log(`[call-intel] Call ${callId} processed: ${outcome}`);
 
   } catch (e) {
