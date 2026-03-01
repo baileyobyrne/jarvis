@@ -3868,6 +3868,200 @@ function SearchPage({ token }) {
   );
 }
 
+// ── Recordings Page ────────────────────────────────────────────────────────
+function RecordingsPage({ token }) {
+  const [recordings, setRecordings] = React.useState([]);
+  const [selected, setSelected] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [copied, setCopied] = React.useState(false);
+
+  const outcomeColors = {
+    connected: '#22c55e',
+    left_message: '#f59e0b',
+    not_interested: '#ef4444',
+    callback_requested: '#3b82f6',
+    appraisal_booked: '#C8A96E',
+    other: '#64748b',
+  };
+  const outcomeLabels = {
+    connected: 'Connected',
+    left_message: 'Left Message',
+    not_interested: 'Not Interested',
+    callback_requested: 'Callback Requested',
+    appraisal_booked: 'Appraisal Booked',
+    other: 'Other',
+  };
+
+  React.useEffect(() => {
+    apiFetch('/api/calls', token)
+      .then(r => r.json())
+      .then(data => { setRecordings(Array.isArray(data) ? data : []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [token]);
+
+  const loadDetail = async (id) => {
+    const r = await apiFetch(`/api/calls/${id}`, token);
+    const data = await r.json();
+    setSelected(data);
+  };
+
+  const copySms = () => {
+    if (!selected?.sms_draft) return;
+    navigator.clipboard.writeText(selected.sms_draft).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  if (loading) return <div style={{ padding: 32, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>Loading recordings…</div>;
+
+  if (recordings.length === 0) {
+    return (
+      <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+        <div style={{ fontSize: 32, marginBottom: 12 }}>🎙️</div>
+        <div style={{ marginBottom: 8 }}>No call recordings yet.</div>
+        <div style={{ opacity: 0.6 }}>Start the Mac companion and make a call from the dashboard.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', gap: 16, height: 'calc(100vh - 160px)', overflow: 'hidden' }}>
+      {/* List panel */}
+      <div style={{ width: 320, flexShrink: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {recordings.map(rec => (
+          <div
+            key={rec.id}
+            onClick={() => loadDetail(rec.id)}
+            style={{
+              background: selected?.id === rec.id ? 'rgba(200,169,110,0.08)' : 'rgba(255,255,255,0.02)',
+              border: `1px solid ${selected?.id === rec.id ? 'rgba(200,169,110,0.3)' : 'rgba(255,255,255,0.06)'}`,
+              borderRadius: 8,
+              padding: '12px 14px',
+              cursor: 'pointer',
+              transition: 'all 0.15s',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-primary)', fontWeight: 600 }}>
+                {rec.contact_name || 'Unknown Contact'}
+              </div>
+              {rec.outcome && (
+                <span style={{
+                  fontSize: 9, fontFamily: 'var(--font-mono)', letterSpacing: '0.08em',
+                  padding: '2px 6px', borderRadius: 3,
+                  background: `${outcomeColors[rec.outcome]}20`,
+                  color: outcomeColors[rec.outcome],
+                  border: `1px solid ${outcomeColors[rec.outcome]}40`,
+                }}>
+                  {outcomeLabels[rec.outcome] || rec.outcome}
+                </span>
+              )}
+            </div>
+            {rec.summary && (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
+                {rec.summary}
+              </div>
+            )}
+            {!rec.processed_at && (
+              <div style={{ fontSize: 10, color: '#f59e0b', fontFamily: 'var(--font-mono)', marginTop: 4 }}>⏳ Processing…</div>
+            )}
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginTop: 6, opacity: 0.5 }}>
+              {new Date(rec.created_at).toLocaleString('en-AU', { dateStyle: 'short', timeStyle: 'short' })}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Detail panel */}
+      <div style={{ flex: 1, overflowY: 'auto', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 10, padding: 20 }}>
+        {!selected ? (
+          <div style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12, paddingTop: 40, textAlign: 'center' }}>
+            Select a recording to view details
+          </div>
+        ) : (
+          <div>
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontFamily: 'var(--font-mono)', fontSize: 14, color: 'var(--text-primary)', fontWeight: 700, marginBottom: 4 }}>
+                {selected.contact_name || 'Unknown Contact'}
+              </div>
+              {selected.outcome && (
+                <span style={{
+                  fontSize: 10, fontFamily: 'var(--font-mono)', letterSpacing: '0.08em',
+                  padding: '3px 8px', borderRadius: 4,
+                  background: `${outcomeColors[selected.outcome]}20`,
+                  color: outcomeColors[selected.outcome],
+                  border: `1px solid ${outcomeColors[selected.outcome]}40`,
+                }}>
+                  {outcomeLabels[selected.outcome] || selected.outcome}
+                </span>
+              )}
+            </div>
+
+            {selected.summary && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 9, fontFamily: 'var(--font-mono)', letterSpacing: '0.1em', color: 'var(--text-muted)', marginBottom: 6 }}>SUMMARY</div>
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>{selected.summary}</div>
+              </div>
+            )}
+
+            {selected.action_items && selected.action_items.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 9, fontFamily: 'var(--font-mono)', letterSpacing: '0.1em', color: 'var(--text-muted)', marginBottom: 6 }}>ACTION ITEMS</div>
+                {(Array.isArray(selected.action_items) ? selected.action_items : []).map((item, i) => (
+                  <div key={i} style={{ fontSize: 12, color: 'var(--text-secondary)', padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                    • {item}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {selected.sms_draft && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 9, fontFamily: 'var(--font-mono)', letterSpacing: '0.1em', color: 'var(--text-muted)', marginBottom: 6 }}>SMS DRAFT</div>
+                <div style={{
+                  background: 'rgba(200,169,110,0.06)', border: '1px solid rgba(200,169,110,0.2)',
+                  borderRadius: 8, padding: '12px 14px', marginBottom: 8,
+                  fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.6, fontStyle: 'italic'
+                }}>
+                  "{selected.sms_draft}"
+                </div>
+                <button
+                  onClick={copySms}
+                  style={{
+                    fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.08em',
+                    padding: '6px 14px', borderRadius: 4, cursor: 'pointer',
+                    background: copied ? 'rgba(34,197,94,0.15)' : 'rgba(200,169,110,0.1)',
+                    border: `1px solid ${copied ? 'rgba(34,197,94,0.4)' : 'rgba(200,169,110,0.3)'}`,
+                    color: copied ? '#22c55e' : '#C8A96E',
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  {copied ? '✓ Copied' : 'Copy SMS'}
+                </button>
+              </div>
+            )}
+
+            {selected.transcript && (
+              <div>
+                <div style={{ fontSize: 9, fontFamily: 'var(--font-mono)', letterSpacing: '0.1em', color: 'var(--text-muted)', marginBottom: 6 }}>FULL TRANSCRIPT</div>
+                <div style={{
+                  background: 'rgba(0,0,0,0.3)', borderRadius: 8, padding: '12px 14px',
+                  fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7,
+                  whiteSpace: 'pre-wrap', maxHeight: 300, overflowY: 'auto',
+                  fontFamily: 'var(--font-mono)',
+                }}>
+                  {selected.transcript}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Sidebar ────────────────────────────────────────────────────────────────
 function Sidebar({ page, onNav, remainingCount, reminderCount, mobileOpen }) {
   const today = new Date().toLocaleDateString('en-AU', {
