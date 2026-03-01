@@ -10,6 +10,7 @@
  *   node scripts/process-followups.js --dry-run --limit 50
  *   node scripts/process-followups.js --skip-notes
  *   node scripts/process-followups.js --skip-appraisals
+ *   node scripts/process-followups.js --since-days 8  (weekly incremental: only last 8 days of notes)
  */
 require('/root/.openclaw/node_modules/dotenv').config({ path: '/root/.openclaw/.env', override: true });
 const axios  = require('/root/.openclaw/node_modules/axios');
@@ -20,6 +21,8 @@ const SKIP_NOTES      = process.argv.includes('--skip-notes');
 const SKIP_APPRAISALS = process.argv.includes('--skip-appraisals');
 const limitIdx        = process.argv.indexOf('--limit');
 const LIMIT           = limitIdx > -1 ? parseInt(process.argv[limitIdx + 1]) : null;
+const sinceDaysIdx    = process.argv.indexOf('--since-days');
+const SINCE_DAYS      = sinceDaysIdx > -1 ? parseInt(process.argv[sinceDaysIdx + 1]) : null;
 
 const TODAY = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
 
@@ -104,11 +107,15 @@ function loadActionableNotes() {
   db.prepare(`SELECT id, name, mobile, do_not_call FROM contacts`).all()
     .forEach(c => contactMap.set(String(c.id), c));
 
+  const sinceDate = SINCE_DAYS
+    ? new Date(Date.now() - SINCE_DAYS * 86400000).toISOString().slice(0, 10)
+    : '2025-06-01';
+
   const rows = db.prepare(`
     SELECT contact_id, note, created_at
     FROM contact_notes
     WHERE LENGTH(note) > 15
-      AND created_at >= '2025-06-01'
+      AND created_at >= '${sinceDate}'
     ORDER BY contact_id, created_at ASC
   `).all();
 

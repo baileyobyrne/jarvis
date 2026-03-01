@@ -3621,6 +3621,49 @@ setInterval(async () => {
   }
 }, 60 * 1000); // check every minute
 
+// ─── Automation 4: Weekly AgentBox sync — Sunday 8am AEDT (21:00 UTC Sat) ─────
+// Chains: sync-agentbox-activities → sync-agentbox-appraisals → process-followups --since-days 8
+let _weeklySyncLastFired = null;
+function spawnScript(cmd, args, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { cwd, env: process.env });
+    child.stdout.on('data', d => process.stdout.write(`[weekly-sync] ${d}`));
+    child.stderr.on('data', d => process.stderr.write(`[weekly-sync] ERR: ${d}`));
+    child.on('close', code => code === 0 ? resolve() : reject(new Error(`${args[0]} exited ${code}`)));
+  });
+}
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const utcDay  = now.getUTCDay();   // 0=Sun
+    const utcHour = now.getUTCHours();
+    const utcMin  = now.getUTCMinutes();
+    const todayKey = now.toISOString().slice(0, 10);
+
+    // Fire Sunday at 21:00 UTC (= 8am AEDT Monday / 7am AEST Monday)
+    if (utcDay === 0 && utcHour === 21 && utcMin === 0 && _weeklySyncLastFired !== todayKey) {
+      _weeklySyncLastFired = todayKey;
+      console.log('[weekly-sync] Starting weekly AgentBox sync chain...');
+
+      const SCRIPTS = '/root/.openclaw/scripts';
+
+      await spawnScript('node', ['/root/.openclaw/scripts/sync-agentbox-activities.js'],  SCRIPTS);
+      console.log('[weekly-sync] Activities sync done.');
+      await spawnScript('node', ['/root/.openclaw/scripts/sync-agentbox-appraisals.js'],  SCRIPTS);
+      console.log('[weekly-sync] Appraisals sync done.');
+      await spawnScript('node', ['/root/.openclaw/scripts/process-followups.js', '--since-days', '8'], SCRIPTS);
+      console.log('[weekly-sync] Follow-up processing done.');
+
+      const total = db.prepare('SELECT COUNT(*) as c FROM reminders WHERE created_at >= datetime(\'now\',\'-1 hour\')').get();
+      const msg = `📋 *Weekly AgentBox Sync Complete*\n✅ Activities, appraisals & notes synced\n🔔 ${total.c} new follow-up reminder${total.c === 1 ? '' : 's'} created`;
+      setImmediate(async () => { try { await sendTelegramMessage(msg); } catch (_) {} });
+    }
+  } catch (e) {
+    console.warn('[weekly-sync] Error:', e.message);
+    setImmediate(async () => { try { await sendTelegramMessage(`⚠️ Weekly AgentBox sync failed: ${e.message}`); } catch (_) {} });
+  }
+}, 60 * 1000); // check every minute
+
 // ─── Static dashboard (catches all unmatched routes — must be last) ───────────
 app.use(express.static(DASHBOARD_DIR));
 
