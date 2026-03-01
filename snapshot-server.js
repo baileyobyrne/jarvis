@@ -3687,6 +3687,42 @@ setInterval(async () => {
   }
 }, 60 * 1000); // check every minute
 
+// ─── Call Recordings ──────────────────────────────────────────────────────
+
+// GET /api/calls — list recent recordings (newest first)
+app.get('/api/calls', requireAuth, (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+    const rows = db.prepare(`
+      SELECT id, contact_id, contact_name, audio_filename,
+             duration_seconds, summary, outcome, sms_draft,
+             created_at, processed_at
+      FROM call_recordings
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(limit);
+    res.json(rows);
+  } catch (e) {
+    console.error('[GET /api/calls]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/calls/:id — full record including transcript + action_items
+app.get('/api/calls/:id', requireAuth, (req, res) => {
+  try {
+    const row = db.prepare('SELECT * FROM call_recordings WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    if (row.action_items) {
+      try { row.action_items = JSON.parse(row.action_items); } catch (_) {}
+    }
+    res.json(row);
+  } catch (e) {
+    console.error('[GET /api/calls/:id]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── Static dashboard (catches all unmatched routes — must be last) ───────────
 app.use(express.static(DASHBOARD_DIR));
 
