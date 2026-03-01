@@ -15,6 +15,14 @@ const upload  = multer({
   limits: { fileSize: 10 * 1024 * 1024 }
 });
 
+// Audio upload — separate multer instance for call recordings
+const CALLS_DIR = '/root/.openclaw/workspace/calls';
+if (!fs.existsSync(CALLS_DIR)) fs.mkdirSync(CALLS_DIR, { recursive: true });
+const uploadAudio = multer({
+  dest: CALLS_DIR,
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB — ~10 min MP3
+});
+
 const app  = express();
 const PORT = 4242;
 
