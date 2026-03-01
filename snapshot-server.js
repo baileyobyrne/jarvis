@@ -2990,8 +2990,12 @@ app.get('/api/buyer-profiles', requireAuth, (req, res) => {
   try {
     const VALID_STATUSES = ['active', 'paused', 'purchased', 'archived', 'all'];
     const status = VALID_STATUSES.includes(req.query.status) ? req.query.status : 'active';
-    const where = status === 'all' ? '' : 'WHERE bp.status = ?';
-    const params = status === 'all' ? [] : [status];
+    const contactId = req.query.contact_id || null;
+    const conditions = [];
+    const params = [];
+    if (status !== 'all') { conditions.push('bp.status = ?'); params.push(status); }
+    if (contactId) { conditions.push('bp.contact_id = ?'); params.push(contactId); }
+    const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
     const rows = db.prepare(`
       SELECT bp.*,
              COUNT(bm.id) AS recent_match_count
