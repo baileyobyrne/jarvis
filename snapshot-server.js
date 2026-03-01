@@ -10,7 +10,10 @@ const multer    = require('multer');
 const axios     = require('axios');
 const rateLimit = require('express-rate-limit');
 const { createCalendarEvent, fetchTodayEvents } = require('./lib/ical-calendar.js');
-const upload  = multer({ dest: '/root/.openclaw/workspace/intel/' });
+const upload  = multer({
+  dest: '/root/.openclaw/workspace/intel/',
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
 
 const app  = express();
 const PORT = 4242;
@@ -806,7 +809,7 @@ app.post('/api/contacts/:id/called', requireAuth, (req, res) => {
 // Enriches each topContact with their most recent call_log outcome so the UI
 // can correctly show "already called" state after a page reload.
 // Also applies cross-event dedup: each contact only appears in the event where they score highest.
-app.get('/api/alerts', (req, res) => {
+app.get('/api/alerts', requireAuth, (req, res) => {
   try {
     if (!fs.existsSync(ALERTS_FILE)) return res.json([]);
     let alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
@@ -987,9 +990,15 @@ function generateSnapshot() {
     const ext      = path.extname(filePath).replace('.', '');
     const lang     = ext === 'js' ? 'javascript' : ext === 'json' ? 'json' : 'markdown';
     content += `## ${filename}\n*Path: ${filePath}*\n\n`;
-    content += fs.existsSync(filePath)
-      ? `\`\`\`${lang}\n${fs.readFileSync(filePath, 'utf8')}\n\`\`\`\n\n`
-      : `> ⚠️ FILE NOT FOUND AT THIS PATH\n\n`;
+    let fileContent;
+    try {
+      fileContent = fs.existsSync(filePath)
+        ? `\`\`\`${lang}\n${fs.readFileSync(filePath, 'utf8')}\n\`\`\`\n\n`
+        : `> ⚠️ FILE NOT FOUND AT THIS PATH\n\n`;
+    } catch (e) {
+      fileContent = `> ⚠️ ERROR READING FILE: ${e.message}\n\n`;
+    }
+    content += fileContent;
     content += `---\n\n`;
   }
   return content;
@@ -1668,27 +1677,32 @@ app.get('/api/contacts/search', requireAuth, (req, res) => {
 
 // ── POST /api/contacts — create new contact ─────────────────────────────────
 app.post('/api/contacts', requireAuth, (req, res) => {
-  const { name, mobile, address, suburb, beds, baths, property_type, do_not_call } = req.body || {};
-  if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
+  try {
+    const { name, mobile, address, suburb, beds, baths, property_type, do_not_call } = req.body || {};
+    if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
 
-  const id = 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
-  db.prepare(`
-    INSERT INTO contacts (id, name, mobile, address, suburb, beds, baths, property_type, do_not_call, source, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', datetime('now','localtime'), datetime('now','localtime'))
-  `).run(
-    id,
-    name.trim(),
-    (mobile || '').trim(),
-    (address || '').trim(),
-    (suburb || '').trim(),
-    (beds || '').toString().trim(),
-    (baths || '').toString().trim(),
-    (property_type || '').trim(),
-    do_not_call ? 1 : 0
-  );
+    const id = 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    db.prepare(`
+      INSERT INTO contacts (id, name, mobile, address, suburb, beds, baths, property_type, do_not_call, source, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', datetime('now','localtime'), datetime('now','localtime'))
+    `).run(
+      id,
+      name.trim(),
+      (mobile || '').trim(),
+      (address || '').trim(),
+      (suburb || '').trim(),
+      (beds || '').toString().trim(),
+      (baths || '').toString().trim(),
+      (property_type || '').trim(),
+      do_not_call ? 1 : 0
+    );
 
-  const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(id);
-  res.json({ ok: true, contact });
+    const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(id);
+    res.json({ ok: true, contact });
+  } catch (e) {
+    console.error('[POST /api/contacts]', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // DELETE /api/contacts/:id — remove a contact with full cascade cleanup
@@ -2544,7 +2558,12 @@ app.patch('/api/market-events/:id', requireAuth, async (req, res) => {
 
     // Auto-link: when a listing transitions to sold status, record the link
     if (newStatus === 'sold' && existing.status !== 'sold' && existing.type === 'listing') {
-      db.prepare(`UPDATE market_events SET linked_event_id = ? WHERE id = ?`).run(existing.id, id);
+      const soldEvent = db.prepare(
+        `SELECT id FROM market_events WHERE address = ? AND type = 'sold' AND id != ? ORDER BY detected_at DESC LIMIT 1`
+      ).get(existing.address, id);
+      if (soldEvent) {
+        db.prepare('UPDATE market_events SET linked_event_id = ? WHERE id = ?').run(soldEvent.id, id);
+      }
     }
 
     // Update listing-alerts.json too

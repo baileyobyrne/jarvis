@@ -8,9 +8,9 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const {
   Phone, ChevronDown, ChevronUp, Bell, TrendingUp, Users, Clock,
   MapPin, Calendar, Check, X, AlertCircle, Home, Activity,
-  MessageSquare, PhoneCall, PhoneOff, PhoneMissed, Star, RefreshCw,
-  History, Menu, Building2, CheckCircle, Bed, Bath, Car, Plus, Mail,
-  Search, Pencil, Trash2, Copy, SortAsc, Send, ClipboardList, FileEdit, Wand2
+  MessageSquare, PhoneCall, PhoneOff, Star, RefreshCw,
+  History, Menu, Building2, CheckCircle, Plus, Mail,
+  Search, Pencil, Trash2, Copy, Send, ClipboardList, FileEdit, Wand2
 } = LucideReact;
 
 // SMS link helper — opens iMessages on macOS
@@ -781,7 +781,7 @@ function ContactCard({ contact, token, onLogged, context, eventAddress, autoExpa
       )}
 
       {/* Edit modal */}
-      {showEdit && localContact.id && (
+      {showEdit && (localContact.id || localContact.contact_id) && (
         <EditContactModal
           contact={localContact}
           token={token}
@@ -865,11 +865,13 @@ function EditContactModal({ contact, token, onSaved, onClose }) {
   const [saving,  setSaving]  = useState(false);
   const [error,   setError]   = useState(null);
 
+  const editContactId = contact.id || contact.contact_id;
+
   const handleSave = useCallback(async () => {
     if (!name.trim()) { setError('Name is required'); return; }
     setSaving(true); setError(null);
     try {
-      const res = await apiFetch(`/api/contacts/${contact.id}`, token, {
+      const res = await apiFetch(`/api/contacts/${editContactId}`, token, {
         method: 'PATCH',
         body: JSON.stringify({
           name: name.trim(), mobile: mobile.trim(),
@@ -883,7 +885,7 @@ function EditContactModal({ contact, token, onSaved, onClose }) {
       onClose();
     } catch (e) { setError(e.message); }
     finally { setSaving(false); }
-  }, [contact.id, name, mobile, address, suburb, dnc, token, onSaved, onClose]);
+  }, [editContactId, name, mobile, address, suburb, dnc, token, onSaved, onClose]);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -1017,22 +1019,24 @@ function ContactNotesModal({ contact, token, onClose, prefilledNote = '' }) {
   const [savingRem,    setSavingRem]    = useState(false);
   const [remSaved,     setRemSaved]     = useState(false);
 
+  const cid = contact.id || contact.contact_id;
+
   useEffect(() => {
-    if (!contact.id) { setLoading(false); return; }
+    if (!contact.id && !contact.contact_id) { setLoading(false); return; }
     Promise.all([
-      apiFetch(`/api/contacts/${contact.id}/notes`, token).then(r => r.json()),
-      apiFetch(`/api/contacts/${contact.id}/history`, token).then(r => r.json()),
+      apiFetch(`/api/contacts/${cid}/notes`, token).then(r => r.json()),
+      apiFetch(`/api/contacts/${cid}/history`, token).then(r => r.json()),
     ]).then(([n, h]) => {
       setNotes(Array.isArray(n) ? n : []);
       setHistory(Array.isArray(h) ? h : []);
     }).catch(() => {}).finally(() => setLoading(false));
-  }, [contact.id, token]);
+  }, [cid, token]);
 
   const handleSaveNote = useCallback(async () => {
     if (!noteText.trim()) return;
     setSaving(true);
     try {
-      const res = await apiFetch(`/api/contacts/${contact.id}/notes`, token, {
+      const res = await apiFetch(`/api/contacts/${cid}/notes`, token, {
         method: 'POST', body: JSON.stringify({ note: noteText.trim() })
       });
       const data = await res.json();
@@ -1040,7 +1044,7 @@ function ContactNotesModal({ contact, token, onClose, prefilledNote = '' }) {
       setNoteText('');
     } catch (_) {}
     finally { setSaving(false); }
-  }, [contact.id, noteText, token]);
+  }, [cid, noteText, token]);
 
   const handleSaveReminder = useCallback(async () => {
     setSavingRem(true);
@@ -1051,7 +1055,7 @@ function ContactNotesModal({ contact, token, onClose, prefilledNote = '' }) {
       await apiFetch('/api/reminders', token, {
         method: 'POST',
         body: JSON.stringify({
-          contact_id:       contact.id,
+          contact_id:       cid,
           contact_name:     contact.name,
           contact_mobile:   contact.mobile,
           note:             remNote || `Follow up \u2014 ${contact.name}`,
@@ -1152,6 +1156,7 @@ function ContactNotesModal({ contact, token, onClose, prefilledNote = '' }) {
 
 // ── Refer Modal ─────────────────────────────────────────────────────────────
 function ReferModal({ contact, token, onClose, onSuccess }) {
+  const contactId = contact.contact_id || contact.id;
   const [partners, setPartners] = React.useState([]);
   const [partnerId, setPartnerId] = React.useState('');
   const [type, setType] = React.useState('');
@@ -1176,7 +1181,7 @@ function ReferModal({ contact, token, onClose, onSuccess }) {
     if (cc.includes('vendor')) setType('vendor');
     else if (cc.includes('buyer')) setType('buyer');
     else setType('finance');
-    apiFetch(`/api/buyer-profiles?contact_id=${contact.id}`, token).then(r => r.json()).then(profiles => {
+    apiFetch(`/api/buyer-profiles?contact_id=${contactId}`, token).then(r => r.json()).then(profiles => {
       if (Array.isArray(profiles) && profiles.length) {
         const p = profiles[0];
         setBuyerBrief(prev => ({
@@ -1190,7 +1195,7 @@ function ReferModal({ contact, token, onClose, onSuccess }) {
         }));
       }
     }).catch(() => {});
-  }, []);
+  }, [contactId, token]);
 
   const partner = partners.find(p => String(p.id) === partnerId);
 
@@ -1227,7 +1232,7 @@ function ReferModal({ contact, token, onClose, onSuccess }) {
     const res = await apiFetch('/api/referrals', token, {
       method: 'POST',
       body: JSON.stringify({
-        contact_id: contact.id,
+        contact_id: contactId,
         partner_id: parseInt(partnerId),
         type, expected_fee: feeVal,
         disclosure_sent: true,
@@ -1558,8 +1563,8 @@ function CallsPage({ token, onReminderCountChange }) {
     try {
       const [planRes, alertsRes, statusRes, remindersRes] = await Promise.all([
         apiFetch('/api/plan/today', token),
-        fetch('/api/alerts'),
-        fetch('/api/status'),
+        apiFetch('/api/alerts', token),
+        apiFetch('/api/status', token),
         apiFetch('/api/reminders/upcoming', token)
       ]);
       if (planRes.ok) {
@@ -1573,7 +1578,7 @@ function CallsPage({ token, onReminderCountChange }) {
       if (remindersRes.ok) {
         const rems = await remindersRes.json();
         setReminders(Array.isArray(rems) ? rems : []);
-        if (onReminderCountChange) onReminderCountChange(Array.isArray(rems) ? rems.length : 0);
+        if (onReminderCountChange) onReminderCountChange(Array.isArray(rems) ? rems.filter(r => r.fire_at && !r.is_task).length : 0);
       }
     } catch (err) { console.error('Load failed', err); }
     finally { setLoading(false); }
@@ -2261,6 +2266,7 @@ function BuyerModal({ token, buyer, onSaved, onClose }) {
         return;
       }
       const data = await res.json();
+      setSaving(false);
       onSaved(isEdit ? data.buyer : data.buyer);
     } catch (e) {
       setError('Network error');
@@ -2383,7 +2389,7 @@ function BuyerCard({ buyer, token, onEdited, onDelete }) {
     : null;
   const bedsStr = buyer.beds_min ? `${buyer.beds_min}${buyer.beds_max ? '–' + buyer.beds_max : '+'}BR` : null;
 
-  const statusColors = { active: 'var(--green)', paused: 'var(--gold)', purchased: '#3b82f6', archived: 'var(--muted)' };
+  const statusColors = { active: '#22c55e', paused: 'var(--gold)', purchased: '#3b82f6', archived: 'var(--text-muted)' };
 
   const logOutcome = async (outcome) => {
     setLogging(true);
@@ -4105,7 +4111,7 @@ function ReferralMetricCard({ label, value, color, sub }) {
 function PartnerRow({ partner }) {
   const color = PARTNER_TYPE_COLORS[partner.type] || 'var(--text-muted)';
   const feeStr = partner.fee_value
-    ? (partner.fee_type === '%' ? `${partner.fee_value}%` : formatFee(partner.fee_value))
+    ? (partner.fee_type === 'percentage' ? `${partner.fee_value}%` : formatFee(partner.fee_value))
     : '—';
   return (
     <div style={{
@@ -4337,7 +4343,7 @@ function KanbanColumn({ status, referrals, onStatusChange }) {
 
 // ── Add Partner Form ────────────────────────────────────────────────────────
 function AddPartnerForm({ token, onAdded }) {
-  const [form, setForm] = useState({ name: '', type: 'selling_agent', fee_type: '%', fee_value: '', suburb_focus: '', mobile: '' });
+  const [form, setForm] = useState({ name: '', type: 'selling_agent', fee_type: 'percentage', fee_value: '', suburb_focus: '', mobile: '' });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
@@ -4360,7 +4366,7 @@ function AddPartnerForm({ token, onAdded }) {
         }),
       });
       if (!res.ok) { const d = await res.json(); setErr(d.error || 'Failed'); return; }
-      setForm({ name: '', type: 'selling_agent', fee_type: '%', fee_value: '', suburb_focus: '', mobile: '' });
+      setForm({ name: '', type: 'selling_agent', fee_type: 'percentage', fee_value: '', suburb_focus: '', mobile: '' });
       onAdded();
     } catch (e) { setErr(e.message); }
     finally { setSaving(false); }
@@ -4400,8 +4406,8 @@ function AddPartnerForm({ token, onAdded }) {
           <label style={labelStyle}>Fee</label>
           <div style={{ display: 'flex', gap: 6 }}>
             <select style={{ ...inputStyle, width: 54, flexShrink: 0 }} value={form.fee_type} onChange={e => set('fee_type', e.target.value)}>
-              <option value="%">%</option>
-              <option value="$">$</option>
+              <option value="percentage">%</option>
+              <option value="flat">$</option>
             </select>
             <input style={{ ...inputStyle, flex: 1 }} type="number" value={form.fee_value} onChange={e => set('fee_value', e.target.value)} placeholder="0" min="0" />
           </div>
@@ -4627,7 +4633,8 @@ function ReferralProspectsPage({ token }) {
         setPages(data.pages || 1);
         setPage(p);
         setLoading(false);
-      });
+      })
+      .catch(() => setLoading(false));
   }
 
   React.useEffect(() => { load(1, type, suburb); }, [type]);
@@ -4640,18 +4647,22 @@ function ReferralProspectsPage({ token }) {
 
   async function generateScript(contact) {
     setScripts(prev => ({ ...prev, [contact.id]: { loading: true, text: '', copied: false } }));
-    const res = await apiFetch('/api/referral-prospects/outreach-script', token, {
-      method: 'POST',
-      body: JSON.stringify({
-        name: contact.name,
-        suburb: contact.suburb,
-        address: contact.address,
-        contact_class: contact.contact_class,
-        last_modified: contact.last_modified
-      })
-    });
-    const data = await res.json();
-    setScripts(prev => ({ ...prev, [contact.id]: { loading: false, text: data.script || '', copied: false } }));
+    try {
+      const res = await apiFetch('/api/referral-prospects/outreach-script', token, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: contact.name,
+          suburb: contact.suburb,
+          address: contact.address,
+          contact_class: contact.contact_class,
+          last_modified: contact.last_modified
+        })
+      });
+      const data = await res.json();
+      setScripts(prev => ({ ...prev, [contact.id]: { loading: false, text: data.script || '', copied: false } }));
+    } catch (e) {
+      setScripts(prev => ({ ...prev, [contact.id]: { loading: false, text: '', error: true, copied: false } }));
+    }
   }
 
   function copyScript(id, text) {

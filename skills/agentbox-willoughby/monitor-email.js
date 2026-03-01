@@ -1,4 +1,4 @@
-require('dotenv').config({ path: '../../.env' });
+require('dotenv').config({ path: '/root/.openclaw/.env', override: true });
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
 const { getProximityContacts } = require('./get-contacts.js');
@@ -31,6 +31,7 @@ async function sendTelegram(message) {
     }, resolve);
     req.write(body);
     req.end();
+    req.on('error', err => console.error('[sendTelegram] HTTPS error:', err.message));
   });
 }
 
@@ -491,7 +492,7 @@ function updateContactOccupancy(streetAddress) {
     const normTarget = normaliseAddress(streetAddress);
     let updated = false;
 
-    for (const contact of data.contacts) {
+    for (const contact of Object.values(data.contacts)) {
       if (!contact.address) continue;
       if (normaliseAddress(contact.address) === normTarget) {
         contact.occupancy = 'Investor';
@@ -758,7 +759,7 @@ async function processMarketEvent(details, rpMap = new Map(), opts = {}) {
       }
       const idx = alerts.findIndex(a => a.address === address && a.type === details.type);
       if (idx >= 0) alerts[idx] = newEntry; else alerts.push(newEntry);
-      alerts = alerts.slice(-20);
+      alerts = alerts.slice(-200);
       fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
     } catch (e) {
       console.error('  → Alert log write failed:', e.message);
@@ -989,17 +990,12 @@ async function checkEmails() {
       'open saturday',
       'revised guide',
       'price guide',
-      'Penshurst',
       'RP Data',
       'Your RP Data',
       'Changes in Your Market'         // Proping subject line
     ];
 
     let allMessageUids = new Set();
-
-    // TEMPORARY LIVE TEST: Search for Penshurst bypassing all other filters
-    const testMsgs = await client.search({ subject: 'Penshurst', seen: false });
-    testMsgs.forEach(uid => allMessageUids.add(uid));
 
     for (const sender of knownSenders) {
       const msgs = await client.search(process.env.SEARCH_ALL ? { from: sender } : { from: sender, seen: false });
