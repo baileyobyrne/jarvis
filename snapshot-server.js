@@ -3689,6 +3689,273 @@ setInterval(async () => {
 
 // ─── Call Recordings ──────────────────────────────────────────────────────
 
+// Transcribe audio file using OpenAI Whisper API
+async function transcribeAudio(audioFilePath, originalName) {
+  const FormData = require('form-data');
+  const form = new FormData();
+  form.append('file', fs.createReadStream(audioFilePath), {
+    filename: originalName || 'audio.mp3',
+    contentType: 'audio/mpeg',
+  });
+  form.append('model', 'whisper-1');
+  form.append('language', 'en');
+  form.append('response_format', 'text');
+
+  const res = await axios.post(
+    'https://api.openai.com/v1/audio/transcriptions',
+    form,
+    {
+      headers: {
+        ...form.getHeaders(),
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      timeout: 120000,
+    }
+  );
+  return (res.data || '').trim();
+}
+
+// Analyse call transcript with Claude Haiku → structured JSON
+async function analyseCallTranscript(transcript, contactContext) {
+  const contextStr = contactContext
+    ? `Contact: ${contactContext.name || 'Unknown'}. Address: ${contactContext.address || 'N/A'}.`
+    : 'No contact context provided.';
+
+  const systemPrompt = `You are an assistant helping a Sydney real estate agent analyse call transcripts.
+${contextStr}
+Extract the following from the transcript and respond ONLY with valid JSON (no markdown, no extra text):
+{
+  "outcome": "connected|left_message|not_interested|callback_requested|appraisal_booked|other",
+  "summary": "3-5 sentence summary of the call",
+  "action_items": ["array", "of", "concrete", "next", "actions"],
+  "follow_up": { "date": "YYYY-MM-DD or null", "note": "brief note or null" },
+  "calendar_event": { "date": "YYYY-MM-DD or null", "time": "HH:MM or null", "address": "property address or null", "duration_minutes": 60, "title": "event title or null" },
+  "sms_draft": "personalized follow-up SMS text, 1-3 sentences, sounds natural and professional"
+}
+Rules:
+- outcome must be exactly one of the listed values
+- follow_up.date: only if a specific callback time was agreed, format YYYY-MM-DD relative to today (${new Date().toISOString().slice(0,10)})
+- calendar_event: only if an appointment (appraisal, meeting) was explicitly booked; otherwise null
+- sms_draft: write as the agent Bailey, warm and professional, tailored to the outcome`;
+
+  const apiRes = await axios.post(
+    'https://api.anthropic.com/v1/messages',
+    {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 512,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: `Transcript:\n${transcript}` }],
+    },
+    {
+      headers: {
+        'x-api-key':         process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type':      'application/json',
+      },
+      timeout: 30000,
+    }
+  );
+
+  const raw = apiRes.data.content[0].text.trim();
+  const clean = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  return JSON.parse(clean);
+}
+
+// Full async pipeline: transcribe → analyse → auto-actions → telegram
+async function processCallRecording(callId, audioFilePath, originalName, contactContext) {
+  try {
+    // 1. Transcribe
+    console.log(`[call-intel] Transcribing call ${callId}…`);
+    const transcript = await transcribeAudio(audioFilePath, originalName);
+    if (!transcript) throw new Error('Whisper returned empty transcript');
+
+    // 2. Analyse with Claude
+    console.log(`[call-intel] Analysing call ${callId}…`);
+    const analysis = await analyseCallTranscript(transcript, contactContext);
+
+    const {
+      outcome = 'other',
+      summary = '',
+      action_items = [],
+      follow_up,
+      calendar_event,
+      sms_draft = '',
+    } = analysis;
+
+    // 3. Create reminder if follow_up date present
+    let reminderId = null;
+    if (follow_up && follow_up.date && contactContext) {
+      try {
+        const fireAt = new Date(`${follow_up.date}T09:00:00`);
+        const r = db.prepare(`
+          INSERT INTO reminders (contact_id, contact_name, contact_mobile, note, fire_at)
+          VALUES (?, ?, ?, ?, datetime(?))
+        `).run(
+          contactContext.contact_id || null,
+          contactContext.name || 'Unknown',
+          contactContext.mobile || null,
+          follow_up.note || 'Follow up from call',
+          fireAt.toISOString().replace('T', ' ').slice(0, 19)
+        );
+        reminderId = r.lastInsertRowid;
+      } catch (e) {
+        console.warn('[call-intel] Reminder insert failed:', e.message);
+      }
+    }
+
+    // 4. Create iCloud calendar event if appointment booked
+    let calendarUid = null;
+    if (calendar_event && calendar_event.date && calendar_event.time) {
+      try {
+        const dtstart = new Date(`${calendar_event.date}T${calendar_event.time}:00`);
+        const dtend = new Date(dtstart.getTime() + (calendar_event.duration_minutes || 60) * 60000);
+        const { randomBytes } = require('crypto');
+        const uid = `jarvis-call-${randomBytes(8).toString('hex')}@jarvis`;
+        await createCalendarEvent({
+          uid,
+          summary: calendar_event.title || `Appraisal — ${contactContext?.name || 'Contact'}`,
+          description: `Booked during prospecting call.\n\n${summary}`,
+          dtstart,
+          dtend,
+        });
+        calendarUid = uid;
+      } catch (e) {
+        console.warn('[call-intel] iCal event failed:', e.message);
+      }
+    }
+
+    // 5. Update contact outcome in daily_plans if contact_id known
+    if (contactContext?.contact_id) {
+      try {
+        const outcomeMap = {
+          connected: 'connected',
+          left_message: 'left_message',
+          not_interested: 'not_interested',
+          callback_requested: 'callback_requested',
+          appraisal_booked: 'appraisal_booked',
+        };
+        const mappedOutcome = outcomeMap[outcome] || 'connected';
+        db.prepare(`
+          UPDATE daily_plans SET outcome = ?, updated_at = datetime('now')
+          WHERE contact_id = ? AND plan_date = date('now') AND outcome IS NULL
+        `).run(mappedOutcome, contactContext.contact_id);
+      } catch (e) {
+        console.warn('[call-intel] daily_plans update failed:', e.message);
+      }
+    }
+
+    // 6. Persist everything to call_recordings
+    db.prepare(`
+      UPDATE call_recordings
+      SET transcript = ?, summary = ?, outcome = ?, action_items = ?,
+          sms_draft = ?, calendar_event_uid = ?, reminder_id = ?,
+          processed_at = datetime('now')
+      WHERE id = ?
+    `).run(
+      transcript,
+      summary,
+      outcome,
+      JSON.stringify(action_items),
+      sms_draft,
+      calendarUid,
+      reminderId,
+      callId
+    );
+
+    // 7. Telegram notification
+    const outcomeEmoji = {
+      connected: '✅',
+      left_message: '📬',
+      not_interested: '❌',
+      callback_requested: '🔁',
+      appraisal_booked: '🏠',
+      other: '📞',
+    }[outcome] || '📞';
+
+    const outcomeLabel = {
+      connected: 'Connected',
+      left_message: 'Left Message',
+      not_interested: 'Not Interested',
+      callback_requested: 'Callback Requested',
+      appraisal_booked: 'Appraisal Booked',
+      other: 'Other',
+    }[outcome] || outcome;
+
+    let msg = `📞 <b>CALL COMPLETE${contactContext?.name ? ` — ${contactContext.name}` : ''}</b>`;
+    if (contactContext?.address) msg += `\n📍 ${contactContext.address}`;
+    msg += `\n\nOutcome: ${outcomeEmoji} <b>${outcomeLabel}</b>`;
+    if (summary) msg += `\n\n${summary}`;
+    if (calendarUid && calendar_event) {
+      msg += `\n\n📅 <b>Calendar event created:</b> ${calendar_event.title || 'Appointment'} on ${calendar_event.date} at ${calendar_event.time}`;
+    }
+    if (follow_up?.date && !calendarUid) {
+      msg += `\n\n🔁 <b>Follow-up:</b> ${follow_up.date}${follow_up.note ? ` — ${follow_up.note}` : ''}`;
+    }
+    if (action_items.length > 0) {
+      msg += `\n\n<b>Action items:</b>\n${action_items.map(a => `• ${a}`).join('\n')}`;
+    }
+    if (sms_draft) {
+      msg += `\n\n📱 <b>SMS Draft:</b>\n"${sms_draft}"`;
+    }
+    msg += `\n\n<a href="https://72.62.74.105:4242">View in Jarvis</a>`;
+
+    await sendTelegramMessage(msg);
+    console.log(`[call-intel] Call ${callId} processed: ${outcome}`);
+
+  } catch (e) {
+    console.error(`[call-intel] Processing failed for call ${callId}:`, e.message);
+    db.prepare(`UPDATE call_recordings SET summary = ?, processed_at = datetime('now') WHERE id = ?`)
+      .run(`Processing failed: ${e.message}`, callId);
+    sendTelegramMessage(`⚠️ Call recording ${callId} failed to process: ${e.message}`).catch(() => {});
+  }
+}
+
+// POST /api/calls/upload — accepts multipart audio file + contact metadata
+app.post('/api/calls/upload', requireAuth, uploadAudio.single('audio'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No audio file uploaded' });
+
+    const contactId   = req.body.contact_id   ? String(req.body.contact_id).trim() : null;
+    const contactName = (req.body.contact_name || '').trim() || null;
+    const mobile      = (req.body.mobile || '').trim() || null;
+    const address     = (req.body.address || '').trim() || null;
+    const duration    = req.body.duration ? parseInt(req.body.duration) : null;
+
+    // Move file to final name (multer uses temp filename)
+    const ext = path.extname(req.file.originalname || '.mp3') || '.mp3';
+    const finalName = `call-${Date.now()}${ext}`;
+    const finalPath = path.join(CALLS_DIR, finalName);
+    fs.renameSync(req.file.path, finalPath);
+
+    // Insert stub record
+    const r = db.prepare(`
+      INSERT INTO call_recordings (contact_id, contact_name, audio_filename, duration_seconds)
+      VALUES (?, ?, ?, ?)
+    `).run(contactId, contactName, finalName, duration);
+
+    const callId = r.lastInsertRowid;
+    res.json({ call_id: callId, status: 'processing' });
+
+    // Process asynchronously — do not await
+    setImmediate(() => {
+      const contactContext = (contactId || contactName) ? {
+        contact_id: contactId,
+        name: contactName,
+        mobile,
+        address,
+      } : null;
+      processCallRecording(callId, finalPath, req.file.originalname, contactContext)
+        .catch(e => console.error('[call-intel] setImmediate error:', e.message));
+    });
+
+  } catch (e) {
+    console.error('[POST /api/calls/upload]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/calls — list recent recordings (newest first)
 app.get('/api/calls', requireAuth, (req, res) => {
   try {
