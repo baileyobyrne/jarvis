@@ -1729,6 +1729,21 @@ app.delete('/api/contacts/:id', requireAuth, (req, res) => {
   }
 });
 
+// GET /api/contacts/:id — fetch a single contact by id
+app.get('/api/contacts/:id', requireAuth, (req, res) => {
+  try {
+    const { id } = req.params;
+    const contact = db.prepare(
+      'SELECT id, name, mobile, address, suburb, do_not_call FROM contacts WHERE id = ?'
+    ).get(id);
+    if (!contact) return res.status(404).json({ error: 'Contact not found' });
+    res.json({ ok: true, contact });
+  } catch (e) {
+    console.error('[GET /api/contacts/:id]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // PATCH /api/contacts/:id — edit contact fields
 app.patch('/api/contacts/:id', requireAuth, (req, res) => {
   try {
