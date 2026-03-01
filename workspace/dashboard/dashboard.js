@@ -10,7 +10,7 @@ const {
   MapPin, Calendar, Check, X, AlertCircle, Home, Activity,
   MessageSquare, PhoneCall, PhoneOff, Star, RefreshCw,
   History, Menu, Building2, CheckCircle, Plus, Mail,
-  Search, Pencil, Trash2, Copy, Send, ClipboardList, FileEdit, Wand2, User
+  Search, Pencil, Trash2, Copy, Send, ClipboardList, FileEdit, Wand2, User, Mic
 } = LucideReact;
 
 // SMS link helper — opens iMessages on macOS
@@ -622,7 +622,22 @@ function ContactCard({ contact, token, onLogged, context, eventAddress, autoExpa
           )}
           {localContact.mobile && (
             <>
-              <a className="prospect-tel" href={`tel:${localContact.mobile}`}>
+              <a
+                className="prospect-tel"
+                href={`tel:${localContact.mobile}`}
+                onClick={() => {
+                  fetch('http://localhost:5678/upcoming-call', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      contact_id: localContact.id || localContact.contact_id,
+                      name: localContact.name,
+                      mobile: localContact.mobile,
+                      address: localContact.address,
+                    }),
+                  }).catch(() => {});
+                }}
+              >
                 <Phone size={11} />{localContact.mobile}
               </a>
               <a className="prospect-sms" href={smsHref(localContact.mobile)} title="Send iMessage/SMS">
@@ -3417,7 +3432,17 @@ function SearchCard({ prop, token, onAddedToPlan, onDeleted, onEdited }) {
       {/* Action row */}
       <div className="search-card-actions">
         {phone && !prop.do_not_call && (
-          <a className="search-action-btn search-action--call" href={`tel:${phone}`}>
+          <a
+            className="search-action-btn search-action--call"
+            href={`tel:${phone}`}
+            onClick={() => {
+              fetch('http://localhost:5678/upcoming-call', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mobile: phone }),
+              }).catch(() => {});
+            }}
+          >
             <Phone size={10} /> Call
           </a>
         )}
@@ -4076,7 +4101,8 @@ function Sidebar({ page, onNav, remainingCount, reminderCount, mobileOpen }) {
     { id: 'prospects', label: 'Prospects', Icon: Search },
     { id: 'reminders', label: 'Reminders', Icon: Bell, badge: reminderCount > 0 ? reminderCount : null },
     { id: 'contacts', label: 'Contacts', Icon: Users },
-    { id: 'history', label: 'History', Icon: History }
+    { id: 'history', label: 'History', Icon: History },
+    { id: 'recordings', label: 'Recordings', Icon: Mic },
   ];
 
   return (
@@ -4116,7 +4142,8 @@ function MobileHeader({ page, onMenuClick }) {
     prospects: 'Prospects',
     reminders: 'Reminders',
     contacts: 'Contacts',
-    history: 'History'
+    history: 'History',
+    recordings: 'Call Recordings',
   };
   return (
     <div className="mobile-header">
@@ -5184,7 +5211,8 @@ function App() {
     prospects: { title: 'Referral Prospects', subtitle: 'CRM BUYER & VENDOR LEADS — 124K CONTACTS' },
     reminders: { title: 'Reminders', subtitle: 'UPCOMING FOLLOW-UPS' },
     contacts: { title: 'Contacts', subtitle: 'CRM + PRICEFINDER — CONTACTS & PROPERTIES' },
-    history: { title: 'Call History', subtitle: 'TODAY\'S LOGGED OUTCOMES' }
+    history: { title: 'Call History', subtitle: 'TODAY\'S LOGGED OUTCOMES' },
+    recordings: { title: 'Call Recordings', subtitle: 'AI TRANSCRIPTS & POST-CALL INTELLIGENCE' },
   };
   const pt = pageTitles[page] || pageTitles.calls;
 
@@ -5197,8 +5225,9 @@ function App() {
       case 'prospects': return <ReferralProspectsPage token={token} />;
       case 'reminders': return <RemindersPage token={token} onReminderCountChange={setReminderCount} />;
       case 'contacts':  return <SearchPage token={token} />;
-      case 'history':   return <HistoryPage token={token} />;
-      default:          return <CallsPage token={token} onReminderCountChange={setReminderCount} />;
+      case 'history':     return <HistoryPage token={token} />;
+      case 'recordings':  return <RecordingsPage token={token} />;
+      default:            return <CallsPage token={token} onReminderCountChange={setReminderCount} />;
     }
   };
 
