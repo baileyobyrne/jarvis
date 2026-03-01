@@ -2812,9 +2812,9 @@ function ReminderDetailModal({ reminder, token, onClose }) {
               Could not load contact details
             </div>
           )}
-          {reminder.contact_id && displayContact && (
+          {reminder.contact_id && (contact || loading) && (
             <ContactCard
-              contact={displayContact}
+              contact={contact || stub}
               token={token}
               context="search"
             />
