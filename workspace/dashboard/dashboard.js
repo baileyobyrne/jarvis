@@ -2046,9 +2046,9 @@ function MarketPage({ token }) {
             style={{
               padding: '4px 12px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
               fontFamily: 'var(--font-mono)', letterSpacing: 1, textTransform: 'uppercase',
-              background: statusFilter === s ? 'var(--accent)' : 'var(--bg-card)',
+              background: statusFilter === s ? 'var(--accent)' : 'var(--bg-raised)',
               color:      statusFilter === s ? '#000' : 'var(--text-muted)',
-              border:     `1px solid ${statusFilter === s ? 'var(--accent)' : 'var(--border)'}`,
+              border:     `1px solid ${statusFilter === s ? 'var(--accent)' : 'var(--border-subtle)'}`,
               transition: 'all 0.15s',
             }}
           >{s}</button>
@@ -2060,9 +2060,9 @@ function MarketPage({ token }) {
               style={{
                 padding: '4px 10px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
                 fontFamily: 'var(--font-mono)',
-                background: daysFilter === d ? 'var(--bg-raised)' : 'var(--bg-card)',
+                background: daysFilter === d ? 'var(--bg-raised)' : 'var(--bg-raised)',
                 color:      daysFilter === d ? 'var(--text)' : 'var(--text-muted)',
-                border:     `1px solid ${daysFilter === d ? 'var(--border-light, var(--border))' : 'var(--border)'}`,
+                border:     `1px solid ${daysFilter === d ? 'var(--border-subtle)' : 'var(--border-subtle)'}`,
                 transition: 'all 0.15s',
               }}
             >{d}d</button>
@@ -2078,9 +2078,9 @@ function MarketPage({ token }) {
             style={{
               padding: '4px 10px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
               fontFamily: 'var(--font-mono)', letterSpacing: 0.5,
-              background: propertyTypeFilter === val ? 'var(--bg-raised)' : 'var(--bg-card)',
+              background: propertyTypeFilter === val ? 'var(--bg-raised)' : 'var(--bg-raised)',
               color:      propertyTypeFilter === val ? 'var(--gold, var(--accent))' : 'var(--text-muted)',
-              border:     `1px solid ${propertyTypeFilter === val ? 'var(--gold, var(--accent))' : 'var(--border)'}`,
+              border:     `1px solid ${propertyTypeFilter === val ? 'var(--gold, var(--accent))' : 'var(--border-subtle)'}`,
               transition: 'all 0.15s',
             }}
           >{label}</button>
@@ -2092,9 +2092,9 @@ function MarketPage({ token }) {
             style={{
               padding: '4px 8px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
               fontFamily: 'var(--font-mono)',
-              background: 'var(--bg-card)',
+              background: 'var(--bg-raised)',
               color: 'var(--text-muted)',
-              border: '1px solid var(--border)',
+              border: '1px solid var(--border-subtle)',
               outline: 'none',
             }}
           >
@@ -2169,7 +2169,7 @@ function MarketPage({ token }) {
                         <>
                           <span style={{ fontSize: 10, color: 'var(--text-muted)', alignSelf: 'center' }}>Delete?</span>
                           <button onClick={() => handleDelete(ev.id)} style={{ background: '#ef4444', border: 'none', color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 10, cursor: 'pointer' }}>Yes</button>
-                          <button onClick={() => setConfirmDeleteId(null)} style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', color: 'var(--text-muted)', borderRadius: 4, padding: '2px 8px', fontSize: 10, cursor: 'pointer' }}>No</button>
+                          <button onClick={() => setConfirmDeleteId(null)} style={{ background: 'var(--bg-raised)', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)', borderRadius: 4, padding: '2px 8px', fontSize: 10, cursor: 'pointer' }}>No</button>
                         </>
                       ) : (
                         <>

@@ -2936,7 +2936,7 @@ body::before {
 .call-stats-divider {
   width: 1px;
   height: 20px;
-  background: var(--border);
+  background: rgba(255,255,255,0.05);
 }
 
 /* ── Agenda Widget ──────────────────────────────────────────── */
@@ -2995,7 +2995,7 @@ body::before {
   width: 11px;
   height: 11px;
   border-radius: 50%;
-  border: 1.5px solid var(--border);
+  border: 1.5px solid rgba(255,255,255,0.08);
 }
 .agenda-item-icon { flex-shrink: 0; }
 .agenda-item-body { flex: 1; min-width: 0; }
@@ -3037,7 +3037,7 @@ body::before {
 .agenda-add-input {
   flex: 1;
   background: var(--bg-raised);
-  border: 1px solid var(--border);
+  border: var(--border-subtle);
   border-radius: 4px;
   padding: 4px 8px;
   font-size: 11px;
@@ -3047,7 +3047,7 @@ body::before {
 .agenda-add-input::placeholder { color: var(--text-muted); }
 .agenda-add-btn {
   background: none;
-  border: 1px solid var(--border);
+  border: var(--border-subtle);
   border-radius: 4px;
   padding: 4px 7px;
   cursor: pointer;
@@ -3345,11 +3345,11 @@ body::before {
   flex-wrap: wrap;
 }
 
-.buyers-view-toggle { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.buyers-view-toggle { display: flex; gap: 0; border: var(--border-subtle); border-radius: 8px; overflow: hidden; }
 .view-tab {
   padding: 7px 16px;
   font-size: 12px; font-family: var(--font-mono);
-  background: var(--bg-card); color: var(--text-muted);
+  background: var(--bg-raised); color: var(--text-muted);
   border: none; cursor: pointer;
   display: flex; align-items: center; gap: 6px;
   transition: background .15s, color .15s;
@@ -3364,8 +3364,8 @@ body::before {
 .buyers-status-filter { display: flex; gap: 6px; flex-wrap: wrap; }
 .status-filter-btn {
   padding: 5px 10px; font-size: 11px; font-family: var(--font-mono);
-  border: 1px solid var(--border); border-radius: 6px;
-  background: var(--bg-card); color: var(--text-muted); cursor: pointer;
+  border: var(--border-subtle); border-radius: 6px;
+  background: var(--bg-raised); color: var(--text-muted); cursor: pointer;
   text-transform: capitalize; transition: all .15s;
 }
 .status-filter-btn.active { border-color: var(--gold); color: var(--gold); background: rgba(201,168,76,.08); }
@@ -3381,7 +3381,7 @@ body::before {
 .buyers-add-btn:hover { background: rgba(201,168,76,.18); }
 
 .buyer-card {
-  background: var(--bg-card); border: 1px solid var(--border);
+  background: var(--bg-raised); border: var(--border-subtle);
   border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;
   transition: border-color .15s;
 }
@@ -3416,11 +3416,11 @@ body::before {
 
 .buyer-outcome-row {
   display: flex; flex-wrap: wrap; gap: 6px;
-  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+  margin-top: 10px; padding-top: 10px; border-top: var(--border-subtle);
 }
 .outcome-btn {
   padding: 4px 10px; font-size: 11px; border-radius: 5px;
-  border: 1px solid var(--border); background: var(--bg-raised);
+  border: var(--border-subtle); background: var(--bg-raised);
   color: var(--text-muted); cursor: pointer; font-family: var(--font-mono);
   transition: all .15s;
 }
@@ -3430,7 +3430,7 @@ body::before {
 .outcome-btn--not_interested { border-color: var(--outcome-notint); color: var(--outcome-notint); }
 
 .match-card {
-  background: var(--bg-card); border: 1px solid var(--border);
+  background: var(--bg-raised); border: var(--border-subtle);
   border-radius: 8px; padding: 12px 14px; margin-bottom: 8px;
 }
 .match-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
