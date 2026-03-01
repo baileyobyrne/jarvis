@@ -917,6 +917,24 @@ app.get('/api/alerts', (req, res) => {
   }
 });
 
+// DELETE /api/alerts — remove a single alert entry by address (requires auth)
+app.delete('/api/alerts', requireAuth, (req, res) => {
+  try {
+    const { address } = req.body || {};
+    if (!address) return res.status(400).json({ error: 'address required' });
+    if (!fs.existsSync(ALERTS_FILE)) return res.json({ success: true, remaining: 0 });
+    let alerts = JSON.parse(fs.readFileSync(ALERTS_FILE, 'utf8'));
+    const before = alerts.length;
+    alerts = alerts.filter(a => (a.address || '').trim().toLowerCase() !== address.trim().toLowerCase());
+    if (alerts.length === before) return res.status(404).json({ error: 'address not found' });
+    fs.writeFileSync(ALERTS_FILE, JSON.stringify(alerts, null, 2));
+    res.json({ success: true, remaining: alerts.length });
+  } catch (e) {
+    console.error('[DELETE /api/alerts]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── Snapshot download (preserved — moved from GET/POST / to GET/POST /snapshot) ──
 function snapshotLoginPage(error = false) {
   return `<!DOCTYPE html>

@@ -1429,10 +1429,11 @@ function ReferModal({ contact, token, onClose, onSuccess }) {
 }
 
 // ── Event Group (collapsible group within Just Sold / Just Listed) ──────────
-function EventGroup({ alert, token, accentColor, defaultExpanded }) {
+function EventGroup({ alert, token, accentColor, defaultExpanded, onDismiss }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [showMore, setShowMore] = useState(false);
   const [calledMap, setCalledMap] = useState({});
+  const [dismissing, setDismissing] = useState(false);
 
   const contacts = alert.topContacts || [];
   const watchers = alert.type === 'sold' ? (alert.watchers || []) : [];
@@ -1444,8 +1445,25 @@ function EventGroup({ alert, token, accentColor, defaultExpanded }) {
     setCalledMap(prev => ({ ...prev, [id]: outcome }));
   }, []);
 
+  const handleDismiss = useCallback(async (e) => {
+    e.stopPropagation();
+    if (!window.confirm(`Dismiss "${alert.address}" from the board?`)) return;
+    setDismissing(true);
+    try {
+      const res = await apiFetch('/api/alerts', token, {
+        method: 'DELETE',
+        body: JSON.stringify({ address: alert.address }),
+      });
+      if (res.ok && onDismiss) onDismiss(alert.address);
+    } catch (err) { console.error('Dismiss failed', err); }
+    finally { setDismissing(false); }
+  }, [alert.address, token, onDismiss]);
+
   const ageDays = Math.floor((Date.now() - new Date(alert.detectedAt)) / 86400000);
   const ageLabel = ageDays === 0 ? 'TODAY' : ageDays === 1 ? '1 DAY AGO' : `${ageDays} DAYS AGO`;
+  const daysLeft = 14 - ageDays;
+  const daysLeftLabel = daysLeft <= 0 ? 'Expires today' : `${daysLeft}d left`;
+  const daysLeftColor = daysLeft > 7 ? '#22c55e' : daysLeft >= 3 ? 'var(--gold)' : '#ef4444';
 
   const propParts = [
     alert.beds && `${alert.beds}bed`,
@@ -1457,10 +1475,17 @@ function EventGroup({ alert, token, accentColor, defaultExpanded }) {
       <div className="event-group-header" onClick={() => setExpanded(e => !e)}>
         <div className="event-group-meta-row">
           <span className="event-group-age" style={{ color: accentColor }}>{ageLabel}</span>
+          <span style={{ fontSize: 10, color: daysLeftColor, fontFamily: 'var(--font-mono)', marginLeft: 6 }}>{daysLeftLabel}</span>
           {calledCount > 0 && (
             <span className="event-group-progress">{calledCount}/{contacts.length} called</span>
           )}
-          <ChevronDown size={13} style={{ marginLeft: 'auto', transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', color: 'var(--text-muted)', flexShrink: 0 }} />
+          <button
+            onClick={handleDismiss}
+            disabled={dismissing}
+            style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)', padding: '2px 6px', borderRadius: 3, display: 'flex', alignItems: 'center', gap: 3, opacity: dismissing ? 0.5 : 1 }}
+            title="Dismiss from board"
+          >✕ Dismiss</button>
+          <ChevronDown size={13} style={{ transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', color: 'var(--text-muted)', flexShrink: 0 }} />
         </div>
         <div className="event-group-addr">{alert.address}</div>
         <div className="event-group-detail">
@@ -1553,6 +1578,10 @@ function CallsPage({ token, onReminderCountChange }) {
     } catch (err) { console.error('Load failed', err); }
     finally { setLoading(false); }
   }, [token, onReminderCountChange]);
+
+  const handleDismissAlert = useCallback((address) => {
+    setAlerts(prev => prev.filter(a => (a.address || '').trim().toLowerCase() !== address.trim().toLowerCase()));
+  }, []);
 
   const handleTopUp = useCallback(async (n = 10) => {
     setTopping(true);
@@ -1712,6 +1741,7 @@ function CallsPage({ token, onReminderCountChange }) {
               token={token}
               accentColor="#22c55e"
               defaultExpanded={i === 0}
+              onDismiss={handleDismissAlert}
             />
           ))
         )}
@@ -1741,6 +1771,7 @@ function CallsPage({ token, onReminderCountChange }) {
               token={token}
               accentColor="#3b82f6"
               defaultExpanded={i === 0}
+              onDismiss={handleDismissAlert}
             />
           ))
         )}
@@ -3857,12 +3888,16 @@ function BottomTabBar({ page, onNav }) {
 }
 
 // ── Jarvis Chat Panel ────────────────────────────────────────────────────────
+const JARVIS_WELCOME = "G'day Bailey. I have access to your recent market data, farm contacts, and call history. Ask me about recent sales, comparable prices, or talking points for specific properties.";
+const JARVIS_CHIPS = ['Recent Willoughby sales', 'Best contacts to call today', 'Market summary'];
+
 function JarvisChat({ token }) {
   const [open, setOpen]         = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput]       = useState('');
   const [thinking, setThinking] = useState(false);
   const [actionMsg, setActionMsg] = useState('');
+  const [hasUnread, setHasUnread] = useState(false);
   const bottomRef     = useRef(null);
   const inputRef      = useRef(null);
   const actionTimerRef = useRef(null);
@@ -3872,13 +3907,16 @@ function JarvisChat({ token }) {
   }, [messages, open]);
 
   useEffect(() => {
-    if (open && inputRef.current) inputRef.current.focus();
+    if (open) {
+      setHasUnread(false);
+      if (inputRef.current) inputRef.current.focus();
+    }
   }, [open]);
 
   useEffect(() => () => clearTimeout(actionTimerRef.current), []);
 
-  const send = useCallback(async () => {
-    const text = input.trim();
+  const send = useCallback(async (overrideText) => {
+    const text = (overrideText !== undefined ? overrideText : input).trim();
     if (!text || thinking) return;
     const newMessages = [...messages, { role: 'user', content: text }];
     setMessages(newMessages);
@@ -3892,8 +3930,9 @@ function JarvisChat({ token }) {
       if (res.ok) {
         const data = await res.json();
         setMessages(prev => [...prev, { role: 'assistant', content: data.reply }]);
+        if (!open) setHasUnread(true);
         if (data.action?.type === 'price_updated') {
-          setActionMsg(`✅ Price recorded for event #${data.action.event_id}: ${data.action.price}`);
+          setActionMsg(`Price recorded for event #${data.action.event_id}: ${data.action.price}`);
           clearTimeout(actionTimerRef.current);
           actionTimerRef.current = setTimeout(() => setActionMsg(''), 6000);
         }
@@ -3905,25 +3944,35 @@ function JarvisChat({ token }) {
     } finally {
       setThinking(false);
     }
-  }, [input, messages, thinking, token]);
+  }, [input, messages, thinking, token, open]);
 
   const handleKey = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   };
 
+  const handleChip = (chip) => {
+    setInput(chip);
+    send(chip);
+  };
+
   return (
     <>
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="jarvis-chat-fab"
-        title="Chat with Jarvis"
-      >
-        {open ? <X size={20} /> : <MessageSquare size={20} />}
-      </button>
+      <div className="jarvis-chat-fab-wrapper">
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="jarvis-chat-fab"
+          title="Chat with Jarvis"
+        >
+          {open ? <X size={20} /> : <MessageSquare size={20} />}
+          {hasUnread && !open && <span className="jarvis-fab-unread" />}
+        </button>
+        <span className="jarvis-chat-fab-label">JARVIS</span>
+      </div>
 
       {open && (
         <div className="jarvis-chat-panel">
           <div className="jarvis-chat-header">
+            <span className={`jarvis-status-dot ${thinking ? 'jarvis-status-dot--thinking' : 'jarvis-status-dot--ready'}`} />
             <span className="jarvis-chat-title">JARVIS</span>
             <span className="jarvis-chat-subtitle">AI ASSISTANT</span>
             {actionMsg && <span style={{ marginLeft: 8, color: '#22c55e', fontSize: 10 }}>{actionMsg}</span>}
@@ -3939,9 +3988,8 @@ function JarvisChat({ token }) {
 
           <div className="jarvis-chat-messages">
             {messages.length === 0 && (
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: '24px 12px', lineHeight: 1.6 }}>
-                Ask me about recent sales, comparable prices, or talking points for prospecting calls.<br/>
-                <span style={{ fontSize: 10, opacity: 0.6 }}>You can also say "49 Penshurst sold for $1.2M" to record a price.</span>
+              <div className="jarvis-msg jarvis-msg--assistant">
+                <div className="jarvis-msg-bubble">{JARVIS_WELCOME}</div>
               </div>
             )}
             {messages.map((m, i) => (
@@ -3959,6 +4007,12 @@ function JarvisChat({ token }) {
             <div ref={bottomRef} />
           </div>
 
+          <div className="jarvis-chat-chips">
+            {JARVIS_CHIPS.map(chip => (
+              <button key={chip} className="jarvis-chat-chip" onClick={() => handleChip(chip)}>{chip}</button>
+            ))}
+          </div>
+
           <div className="jarvis-chat-input-row">
             <textarea
               ref={inputRef}
@@ -3971,7 +4025,7 @@ function JarvisChat({ token }) {
             />
             <button
               className="jarvis-chat-send"
-              onClick={send}
+              onClick={() => send()}
               disabled={!input.trim() || thinking}
             >
               <Send size={14} />
