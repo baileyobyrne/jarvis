@@ -2850,6 +2850,7 @@ function RemindersPage({ token, onReminderCountChange }) {
             if (onReminderCountChange) onReminderCountChange(next.filter(r => r.fire_at && !r.is_task).length);
             return next;
           });
+          setDetailTarget(null);
         }
       });
   }, [token, onReminderCountChange]);
@@ -2864,6 +2865,7 @@ function RemindersPage({ token, onReminderCountChange }) {
             return next;
           });
           setDeleteConfirmId(null);
+          setDetailTarget(null);
         }
       });
   }, [token, onReminderCountChange]);
