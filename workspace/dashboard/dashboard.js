@@ -2823,6 +2823,7 @@ function RemindersPage({ token, onReminderCountChange }) {
   const [editTarget, setEditTarget] = React.useState(null);
   const [deleteConfirmId, setDeleteConfirmId] = React.useState(null);
   const [quickValues, setQuickValues] = React.useState(null);
+  const [detailTarget, setDetailTarget] = React.useState(null);
 
   const load = React.useCallback(() => {
     setLoading(true);
@@ -2946,8 +2947,8 @@ function RemindersPage({ token, onReminderCountChange }) {
               {label} <span className="rem-group-count">{items.length}</span>
             </div>
             {items.map(r => (
-              <div key={r.id} className={`rem-item rem-item--${urgencyClass(r)}${r.is_task ? ' rem-item--task' : ''}${r.priority === 'high' ? ' rem-item--high' : ''}`}>
-                <button className="rem-check-btn" onClick={() => handleComplete(r.id)} title="Mark complete">
+              <div key={r.id} className={`rem-item rem-item--${urgencyClass(r)}${r.is_task ? ' rem-item--task' : ''}${r.priority === 'high' ? ' rem-item--high' : ''}`} onClick={() => setDetailTarget(r)} style={{ cursor: 'pointer' }}>
+                <button className="rem-check-btn" onClick={e => { e.stopPropagation(); handleComplete(r.id); }} title="Mark complete">
                   <div className="rem-check-circle" />
                 </button>
                 <div className="rem-item-body">
@@ -2956,7 +2957,7 @@ function RemindersPage({ token, onReminderCountChange }) {
                   )}
                   <div className="rem-item-note">{r.note}</div>
                   {r.contact_mobile && (
-                    <a href={`tel:${r.contact_mobile}`} className="rem-item-mobile">
+                    <a href={`tel:${r.contact_mobile}`} className="rem-item-mobile" onClick={e => e.stopPropagation()}>
                       <Phone size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {r.contact_mobile}
                     </a>
                   )}
@@ -2966,16 +2967,16 @@ function RemindersPage({ token, onReminderCountChange }) {
                       <span className="rem-item-time">{fmtDate(r.fire_at)} {fmtTime(r.fire_at)}</span>
                     )}
                     <div className="rem-item-actions">
-                      <button className="icon-btn" onClick={() => setEditTarget(r)} title="Edit">
+                      <button className="icon-btn" onClick={e => { e.stopPropagation(); setEditTarget(r); }} title="Edit">
                         <Pencil size={12} />
                       </button>
                       {deleteConfirmId === r.id ? (
                         <>
-                          <button className="icon-btn icon-btn--danger" onClick={() => handleDelete(r.id)}>Yes</button>
-                          <button className="icon-btn" onClick={() => setDeleteConfirmId(null)}>No</button>
+                          <button className="icon-btn icon-btn--danger" onClick={e => { e.stopPropagation(); handleDelete(r.id); }}>Yes</button>
+                          <button className="icon-btn" onClick={e => { e.stopPropagation(); setDeleteConfirmId(null); }}>No</button>
                         </>
                       ) : (
-                        <button className="icon-btn icon-btn--danger" onClick={() => setDeleteConfirmId(r.id)} title="Delete">
+                        <button className="icon-btn icon-btn--danger" onClick={e => { e.stopPropagation(); setDeleteConfirmId(r.id); }} title="Delete">
                           <Trash2 size={12} />
                         </button>
                       )}
@@ -2987,6 +2988,14 @@ function RemindersPage({ token, onReminderCountChange }) {
           </div>
         );
       })}
+
+      {detailTarget && (
+        <ReminderDetailModal
+          reminder={detailTarget}
+          token={token}
+          onClose={() => setDetailTarget(null)}
+        />
+      )}
 
       {(showAddModal || editTarget) && (
         <AddEditReminderModal
