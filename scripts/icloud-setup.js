@@ -170,7 +170,14 @@ async function main() {
   console.log('\nAvailable Reminders lists (VTODO):');
   reminderLists.forEach((c, i) => console.log(`  [${i}] ${c.name}  ->  ${c.url}`));
 
+  // hasCollectionPath: a specific VTODO collection has at least 3 path segments
+  // (e.g. /11174608089/calendars/<uuid>) — the root /11174608089/calendars/ has only 2.
+  const hasCollectionPath = url => {
+    try { return new URL(url).pathname.split('/').filter(Boolean).length >= 3; } catch { return false; }
+  };
+
   const preferredReminders = reminderLists.find(c => /^work$/i.test(c.name))
+    || reminderLists.find(c => !/inbox|outbox|notification/i.test(c.url) && hasCollectionPath(c.url))
     || reminderLists.find(c => !/inbox|outbox|notification/i.test(c.url))
     || reminderLists[0];
 
