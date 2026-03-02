@@ -113,6 +113,7 @@ async function main() {
 </A:propfind>`;
 
   let calendars = [];
+  let xmlBlocks = [];
   try {
     const r3 = await axios({
       method:  'PROPFIND',
@@ -121,7 +122,7 @@ async function main() {
       headers: { ...HEADERS, 'Depth': '1' },
       data:    propfindCals,
     });
-    const xmlBlocks = r3.data.split(/<\/?[^:>]*:?response>/i).filter(b => b.includes('href'));
+    xmlBlocks = r3.data.split(/<\/?[^:>]*:?response>/i).filter(b => b.includes('href'));
 
     for (const block of xmlBlocks) {
       const href = (block.match(/<[^:>]*:?href[^>]*>([^<]+)<\/[^:>]*:?href>/i) || [])[1];
@@ -152,9 +153,38 @@ async function main() {
 
   writeEnvKey('ICLOUD_CALENDAR_URL', preferred.url);
   console.log('ICLOUD_CALENDAR_URL written to .env');
+
+  // ── VTODO (Reminders) list discovery ──────────────────────────────────────
+  const caldavBase = new URL(homeUrl).origin;
+  const reminderLists = [];
+  for (const block of xmlBlocks) {
+    const href = (block.match(/<[^:>]*:?href[^>]*>([^<]+)<\/[^:>]*:?href>/i) || [])[1];
+    const name = (block.match(/<[^:>]*:?displayname[^>]*>([^<]*)<\/[^:>]*:?displayname>/i) || [])[1];
+    const hasVtodo = /VTODO/i.test(block);
+    if (href && hasVtodo) {
+      const fullUrl = href.startsWith('http') ? href : caldavBase + href;
+      reminderLists.push({ name: (name || '').trim() || '(unnamed)', url: fullUrl });
+    }
+  }
+
+  console.log('\nAvailable Reminders lists (VTODO):');
+  reminderLists.forEach((c, i) => console.log(`  [${i}] ${c.name}  ->  ${c.url}`));
+
+  const preferredReminders = reminderLists.find(c => /^work$/i.test(c.name))
+    || reminderLists.find(c => !/inbox|outbox|notification/i.test(c.url))
+    || reminderLists[0];
+
+  if (preferredReminders) {
+    console.log(`\nUsing Reminders list: "${preferredReminders.name}"`);
+    writeEnvKey('ICLOUD_REMINDERS_URL', preferredReminders.url);
+    console.log('ICLOUD_REMINDERS_URL written to .env');
+  } else {
+    console.warn('\nNo VTODO Reminders list found. Create a list in Apple Reminders app first, then re-run this script.');
+  }
+
   console.log('\nNext steps:');
-  console.log('  pm2 restart jarvis-snapshot');
-  console.log('  Reminders will now sync to iCloud Calendar automatically.\n');
+  console.log('  pm2 restart jarvis-snapshot --update-env');
+  console.log('  Reminders and tasks will now sync to iCloud Calendar + Apple Reminders.\n');
 }
 
 main().catch(e => { console.error(e.message); process.exit(1); });

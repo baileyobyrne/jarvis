@@ -9,7 +9,7 @@ const { db }    = require('./lib/db.js');
 const multer    = require('multer');
 const axios     = require('axios');
 const rateLimit = require('express-rate-limit');
-const { createCalendarEvent, fetchTodayEvents } = require('./lib/ical-calendar.js');
+const { createCalendarEvent, fetchTodayEvents, createAppleReminder, completeAppleReminder, deleteAppleReminder } = require('./lib/ical-calendar.js');
 const upload  = multer({
   dest: '/root/.openclaw/workspace/intel/',
   limits: { fileSize: 10 * 1024 * 1024 }
@@ -1392,6 +1392,21 @@ app.post('/api/reminders', requireAuth, async (req, res) => {
         console.warn('[reminders] iCal sync failed:', calErr.message);
       });
     }
+    // Apple Reminders VTODO sync — all reminders and tasks
+    createAppleReminder({
+      contact_name:   contact_name || 'Manual Task',
+      contact_mobile: contact_mobile || null,
+      note:           note || '',
+      fire_at:        fire_at || null,
+      priority:       priority || 'normal',
+      ical_title:     ical_title || null,
+    }).then(uid => {
+      if (uid) {
+        db.prepare('UPDATE reminders SET vtodo_uid = ? WHERE id = ?').run(uid, r.lastInsertRowid);
+      }
+    }).catch(e => {
+      console.warn('[reminders] Apple Reminder sync failed:', e.message);
+    });
 
     res.json({ ok: true, id: r.lastInsertRowid });
   } catch (e) {
@@ -1419,15 +1434,20 @@ app.get('/api/reminders/upcoming', requireAuth, (req, res) => {
 });
 
 // POST /api/reminders/:id/complete
-app.post('/api/reminders/:id/complete', requireAuth, (req, res) => {
+app.post('/api/reminders/:id/complete', requireAuth, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     if (!id) return res.status(400).json({ error: 'invalid id' });
-    const result = db.prepare(
-      "UPDATE reminders SET completed_at = datetime('now','localtime') WHERE id = ? AND completed_at IS NULL"
-    ).run(id);
-    if (result.changes === 0) return res.status(404).json({ error: 'not found or already completed' });
+    const existing = db.prepare('SELECT vtodo_uid FROM reminders WHERE id = ? AND completed_at IS NULL').get(id);
+    if (!existing) return res.status(404).json({ error: 'not found or already completed' });
+    db.prepare("UPDATE reminders SET completed_at = datetime('now','localtime') WHERE id = ?").run(id);
     res.json({ ok: true });
+    // Fire-and-forget: mark VTODO complete in iCloud
+    if (existing.vtodo_uid) {
+      completeAppleReminder(existing.vtodo_uid).catch(e =>
+        console.warn('[reminders] completeAppleReminder failed:', e.message)
+      );
+    }
   } catch (e) {
     console.error('[POST /api/reminders/:id/complete]', e.message);
     res.status(500).json({ error: e.message });
@@ -1473,13 +1493,19 @@ app.delete('/api/reminders/:id', requireAuth, (req, res) => {
   try {
     const id = parseInt(req.params.id);
     if (!id) return res.status(400).json({ error: 'invalid id' });
-    const existing = db.prepare('SELECT calendar_event_uid FROM reminders WHERE id = ?').get(id);
+    const existing = db.prepare('SELECT calendar_event_uid, vtodo_uid FROM reminders WHERE id = ?').get(id);
     if (!existing) return res.status(404).json({ error: 'not found' });
-    if (existing.calendar_event_uid) {
-      console.warn(`[reminders] DELETE id=${id} — orphaned iCal event: ${existing.calendar_event_uid}`);
-    }
     db.prepare('DELETE FROM reminders WHERE id = ?').run(id);
     res.json({ ok: true });
+    // Fire-and-forget: delete VTODO from Apple Reminders
+    if (existing.vtodo_uid) {
+      deleteAppleReminder(existing.vtodo_uid).catch(e =>
+        console.warn('[reminders] deleteAppleReminder failed:', e.message)
+      );
+    }
+    if (existing.calendar_event_uid) {
+      console.warn(`[reminders] DELETE id=${id} — note: orphaned iCal event ${existing.calendar_event_uid} not deleted from Calendar`);
+    }
   } catch (e) {
     console.error('[DELETE /api/reminders/:id]', e.message);
     res.status(500).json({ error: e.message });
@@ -3686,6 +3712,71 @@ setInterval(async () => {
     setImmediate(async () => { try { await sendTelegramMessage(`⚠️ Weekly AgentBox sync failed: ${e.message}`); } catch (_) {} });
   }
 }, 60 * 1000); // check every minute
+
+// ─── Automation 5: Apple Reminders completion sync — every 5 minutes ──────────
+// Polls iCloud for completed VTODOs in the Work Reminders list and marks
+// matching Jarvis reminders/tasks as complete.
+let _reminderSyncLastFired = 0;
+setInterval(async () => {
+  try {
+    const now = Date.now();
+    if (now - _reminderSyncLastFired < 5 * 60 * 1000) return; // debounce to 5 min
+    _reminderSyncLastFired = now;
+
+    const remUrl  = process.env.ICLOUD_REMINDERS_URL;
+    const appleId = process.env.ICLOUD_APPLE_ID;
+    const appPass = process.env.ICLOUD_APP_PASSWORD;
+    if (!remUrl || !appleId || !appPass) return;
+
+    // Fetch all VTODOs from the Work list via CalDAV REPORT
+    const reportBody = `<?xml version="1.0" encoding="UTF-8"?>
+<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop><d:getetag /><c:calendar-data /></d:prop>
+  <c:filter>
+    <c:comp-filter name="VCALENDAR">
+      <c:comp-filter name="VTODO" />
+    </c:comp-filter>
+  </c:filter>
+</c:calendar-query>`;
+
+    let xml;
+    try {
+      const r = await axios({
+        method: 'REPORT',
+        url: remUrl,
+        auth: { username: appleId, password: appPass },
+        headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Depth': '1' },
+        data: reportBody,
+        timeout: 15000,
+      });
+      xml = r.data;
+    } catch (e) {
+      console.warn('[reminders-sync] CalDAV REPORT failed:', e.response?.status, e.message);
+      return;
+    }
+
+    // Extract calendar-data blocks and look for completed VTODOs with @jarvis UID suffix
+    const dataBlocks = xml.match(/<[^>]*calendar-data[^>]*>([\s\S]*?)<\/[^>]*calendar-data>/gi) || [];
+    let synced = 0;
+    for (const block of dataBlocks) {
+      const ics    = block.replace(/<[^>]+>/g, '').trim();
+      const uid    = (ics.match(/^UID:(.+)$/m) || [])[1]?.trim();
+      const status = (ics.match(/^STATUS:(.+)$/m) || [])[1]?.trim();
+      if (!uid || !uid.endsWith('@jarvis')) continue;
+      if (status !== 'COMPLETED') continue;
+      const result = db.prepare(
+        "UPDATE reminders SET completed_at = datetime('now') WHERE vtodo_uid = ? AND completed_at IS NULL"
+      ).run(uid);
+      if (result.changes > 0) {
+        console.log(`[reminders-sync] Synced completion from Apple Reminders: ${uid}`);
+        synced++;
+      }
+    }
+    if (synced > 0) console.log(`[reminders-sync] ${synced} reminder(s) marked complete from Apple Reminders`);
+  } catch (e) {
+    console.warn('[reminders-sync] Error:', e.message);
+  }
+}, 60 * 1000); // tick every minute, fire every 5 min via debounce
 
 // ─── Call Recordings ──────────────────────────────────────────────────────
 

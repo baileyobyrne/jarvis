@@ -3050,6 +3050,16 @@ function AddEditReminderModal({ token, reminder, initialValues = null, defaultIs
   const [duration,      setDuration]      = React.useState(init.duration_minutes || 30);
   const [priority,      setPriority]      = React.useState(init.priority || 'normal');
   const [icalTitle,     setIcalTitle]     = React.useState(init.ical_title || null);
+  // Contact match confirmation — pendingMatch holds unconfirmed auto-match from parse-nl
+  const [pendingMatch,       setPendingMatch]       = React.useState(
+    (init.contact_id && init.contact_name && init.contact_name !== 'Manual Task')
+      ? { id: init.contact_id, name: init.contact_name, mobile: init.contact_mobile || null }
+      : null
+  );
+  const [confirmedContactId, setConfirmedContactId] = React.useState(
+    // On edit, the existing contact_id is pre-confirmed
+    isEdit && init.contact_id ? init.contact_id : null
+  );
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState('');
 
@@ -3067,7 +3077,7 @@ function AddEditReminderModal({ token, reminder, initialValues = null, defaultIs
       duration_minutes: isTask ? undefined : duration,
       priority,
       ical_title: icalTitle || null,
-      ...(init.contact_id ? { contact_id: init.contact_id } : {}),
+      ...(confirmedContactId ? { contact_id: confirmedContactId } : {}),
     };
     const path = isEdit ? `/api/reminders/${reminder.id}` : '/api/reminders';
     const method = isEdit ? 'PATCH' : 'POST';
@@ -3108,6 +3118,35 @@ function AddEditReminderModal({ token, reminder, initialValues = null, defaultIs
               >Task</button>
             </div>
           </div>
+          {/* ── Contact match confirmation banner ── */}
+          {pendingMatch && (
+            <div className="contact-match-banner">
+              <span className="contact-match-label">
+                Matched: <strong>{pendingMatch.name}</strong>
+                {pendingMatch.mobile && <span className="contact-match-mobile"> — {pendingMatch.mobile}</span>}
+              </span>
+              <div className="contact-match-actions">
+                <button
+                  className="contact-match-confirm"
+                  onClick={() => {
+                    setConfirmedContactId(pendingMatch.id);
+                    setContactName(pendingMatch.name);
+                    setContactMobile(pendingMatch.mobile || '');
+                    setPendingMatch(null);
+                  }}
+                >Confirm</button>
+                <button
+                  className="contact-match-dismiss"
+                  onClick={() => {
+                    setPendingMatch(null);
+                    setConfirmedContactId(null);
+                    setContactName('');
+                    setContactMobile('');
+                  }}
+                >✕ Not them</button>
+              </div>
+            </div>
+          )}
           <div className="modal-field">
             <label>Note *</label>
             <textarea
@@ -3120,12 +3159,23 @@ function AddEditReminderModal({ token, reminder, initialValues = null, defaultIs
           </div>
           <div className="modal-field">
             <label>Contact Name</label>
-            <input
-              className="modal-input"
-              value={contactName}
-              onChange={e => setContactName(e.target.value)}
-              placeholder="Who is this for? (optional)"
-            />
+            <div style={{ position: 'relative' }}>
+              <input
+                className="modal-input"
+                value={contactName}
+                onChange={e => { setContactName(e.target.value); if (!e.target.value) { setConfirmedContactId(null); setPendingMatch(null); } }}
+                placeholder="Who is this for? (optional)"
+                style={{ paddingRight: contactName ? 28 : undefined }}
+              />
+              {contactName && (
+                <button
+                  onClick={() => { setContactName(''); setContactMobile(''); setConfirmedContactId(null); setPendingMatch(null); }}
+                  style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 14, padding: '0 2px', lineHeight: 1 }}
+                  title="Clear contact"
+                  type="button"
+                >✕</button>
+              )}
+            </div>
           </div>
           <div className="modal-field">
             <label>Mobile</label>
