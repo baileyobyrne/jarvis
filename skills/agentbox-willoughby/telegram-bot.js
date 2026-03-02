@@ -63,12 +63,30 @@ async function getUpdates(offset) {
     const res = await telegramRequest('getUpdates', {
       offset,
       timeout: 20,
-      allowed_updates: ['message']
+      allowed_updates: ['message', 'callback_query']
     });
     return res.ok ? (res.result || []) : [];
   } catch (e) {
     console.error('[bot] getUpdates error:', e.message);
     return [];
+  }
+}
+
+async function answerCallbackQuery(callbackQueryId, text) {
+  try {
+    await telegramRequest('answerCallbackQuery', { callback_query_id: callbackQueryId, text: text || '' });
+  } catch (e) {
+    console.error('[bot] answerCallbackQuery error:', e.message);
+  }
+}
+
+async function editMessageText(chatId, messageId, text) {
+  try {
+    await telegramRequest('editMessageText', {
+      chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML'
+    });
+  } catch (e) {
+    console.error('[bot] editMessageText error:', e.message);
   }
 }
 
@@ -234,8 +252,50 @@ async function handleQueryStatus() {
   }
 }
 
+// ─── Handle inline keyboard callback (Done button on reminders) ──────────────
+async function handleCallbackQuery(cbq) {
+  const data = cbq.data || '';
+  if (!data.startsWith('complete_reminder_')) {
+    await answerCallbackQuery(cbq.id, '');
+    return;
+  }
+
+  const id = parseInt(data.replace('complete_reminder_', ''), 10);
+  if (!id) {
+    await answerCallbackQuery(cbq.id, 'Invalid reminder ID');
+    return;
+  }
+
+  try {
+    const result = await dashboardPost(`/api/reminders/${id}/complete`, {});
+    if (result.status === 200 && result.body.ok) {
+      await answerCallbackQuery(cbq.id, '✅ Marked as done!');
+      if (cbq.message) {
+        const original = cbq.message.text || '';
+        await editMessageText(
+          cbq.message.chat.id,
+          cbq.message.message_id,
+          original + '\n\n<i>✅ Completed</i>'
+        );
+      }
+      console.log(`[bot] Reminder #${id} marked complete via Telegram button`);
+    } else {
+      await answerCallbackQuery(cbq.id, result.body?.error || 'Failed to complete');
+    }
+  } catch (e) {
+    console.error('[bot] handleCallbackQuery error:', e.message);
+    await answerCallbackQuery(cbq.id, 'Error completing reminder');
+  }
+}
+
 // ─── Process a single update ──────────────────────────────────────────────────
 async function processUpdate(update) {
+  // Handle inline button callbacks
+  if (update.callback_query) {
+    await handleCallbackQuery(update.callback_query);
+    return;
+  }
+
   const msg  = update.message;
   if (!msg?.text) return;
 
