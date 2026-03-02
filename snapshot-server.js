@@ -617,6 +617,8 @@ async function notifyReferralBuyerMatches(event) {
 // ─── Auth middleware ───────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
   const auth = req.headers['authorization'] || '';
+  const queryToken = req.query.token || '';
+  if (queryToken === DASHBOARD_PASSWORD) return next();
   if (!auth.startsWith('Bearer ') || auth.slice(7) !== DASHBOARD_PASSWORD) {
     return res.status(401).json({ error: 'Unauthorized — valid Bearer token required.' });
   }
@@ -1452,6 +1454,25 @@ app.get('/api/reminders/ios-pending', requireAuth, (req, res) => {
         : r.note ? r.note.substring(0, 80) : 'Jarvis Reminder'),
       notes: r.note || '',
       due: r.fire_at || null,
+      due_formatted: (() => {
+        if (!r.fire_at) return null;
+        const raw = r.fire_at.trim();
+        // Normalise: "2026-03-03 09:00" → "2026-03-03T09:00:00Z", "2026-03-03" → "2026-03-03T00:00:00Z"
+        const iso = raw.includes(' ') ? raw.replace(' ', 'T') + ':00Z'
+                  : raw.includes('T') ? raw
+                  : raw + 'T00:00:00Z';
+        const d = new Date(iso);
+        if (isNaN(d)) return null;
+        const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+        const day = d.getUTCDate();
+        const month = months[d.getUTCMonth()];
+        const year = d.getUTCFullYear();
+        const h = d.getUTCHours();
+        const m = String(d.getUTCMinutes()).padStart(2, '0');
+        const ampm = h >= 12 ? 'PM' : 'AM';
+        const hour = h % 12 || 12;
+        return `${day} ${month} ${year} at ${hour}:${m} ${ampm}`;
+      })(),
       priority: r.priority || 'normal',
       is_task: r.is_task === 1,
     }));
