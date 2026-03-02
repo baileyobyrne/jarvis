@@ -1433,6 +1433,46 @@ app.get('/api/reminders/upcoming', requireAuth, (req, res) => {
   }
 });
 
+// GET /api/reminders/ios-pending — reminders not yet synced to iOS Shortcuts
+app.get('/api/reminders/ios-pending', requireAuth, (req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT id, contact_name, note, fire_at, is_task, priority
+      FROM reminders
+      WHERE ios_synced_at IS NULL AND completed_at IS NULL
+      ORDER BY
+        CASE WHEN fire_at IS NULL THEN 1 ELSE 0 END,
+        fire_at ASC
+      LIMIT 50
+    `).all();
+    const reminders = rows.map(r => ({
+      id: r.id,
+      title: (r.contact_name && r.contact_name !== 'Manual Task'
+        ? `${r.contact_name}${r.note ? ' — ' + r.note.substring(0, 60) : ''}`
+        : r.note ? r.note.substring(0, 80) : 'Jarvis Reminder'),
+      notes: r.note || '',
+      due: r.fire_at || null,
+      priority: r.priority || 'normal',
+      is_task: r.is_task === 1,
+    }));
+    res.json({ reminders });
+  } catch (e) {
+    console.error('[GET /api/reminders/ios-pending]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/reminders/:id/ios-synced — mark reminder as synced to iOS
+app.post('/api/reminders/:id/ios-synced', requireAuth, (req, res) => {
+  try {
+    db.prepare(`UPDATE reminders SET ios_synced_at = datetime('now') WHERE id = ?`).run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[POST /api/reminders/:id/ios-synced]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/reminders/:id/complete
 app.post('/api/reminders/:id/complete', requireAuth, async (req, res) => {
   try {
