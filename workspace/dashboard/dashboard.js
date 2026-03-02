@@ -2830,6 +2830,261 @@ function ReminderDetailModal({ reminder, token, onClose }) {
   );
 }
 
+// ── useSwipe hook ───────────────────────────────────────────────────────────
+function useSwipe(onSwipeRight, onSwipeLeft) {
+  const ref = React.useRef(null);
+  const startX = React.useRef(null);
+  const currentX = React.useRef(null);
+
+  React.useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    const onStart = e => {
+      startX.current = e.touches[0].clientX;
+      currentX.current = e.touches[0].clientX;
+      el.style.transition = 'none';
+    };
+    const onMove = e => {
+      if (startX.current === null) return;
+      currentX.current = e.touches[0].clientX;
+      const dx = currentX.current - startX.current;
+      if (Math.abs(dx) > 10) {
+        el.style.transform = `translateX(${Math.max(-80, Math.min(80, dx))}px)`;
+      }
+    };
+    const onEnd = () => {
+      if (startX.current === null) return;
+      const dx = currentX.current - startX.current;
+      el.style.transition = 'transform 0.2s ease';
+      el.style.transform = 'translateX(0)';
+      if (dx > 60) onSwipeRight?.();
+      else if (dx < -60) onSwipeLeft?.();
+      startX.current = null;
+    };
+
+    el.addEventListener('touchstart', onStart, { passive: true });
+    el.addEventListener('touchmove', onMove, { passive: true });
+    el.addEventListener('touchend', onEnd);
+    return () => {
+      el.removeEventListener('touchstart', onStart);
+      el.removeEventListener('touchmove', onMove);
+      el.removeEventListener('touchend', onEnd);
+    };
+  }, [onSwipeRight, onSwipeLeft]);
+
+  return ref;
+}
+
+// ── RemindersStatsBar ───────────────────────────────────────────────────────
+function RemindersStatsBar({ groups }) {
+  const overdueCount  = groups.overdue.length;
+  const todayCount    = groups.today.length;
+  const weekCount     = groups.this_week.length + groups.tomorrow.length;
+  const taskCount     = groups.no_date.length;
+  return (
+    <div className="rem-stats-bar">
+      {overdueCount > 0 && (
+        <div className="rem-stat rem-stat--overdue">
+          <span className="rem-stat-num">{overdueCount}</span>
+          <span className="rem-stat-label">overdue</span>
+        </div>
+      )}
+      <div className={`rem-stat${todayCount > 0 ? ' rem-stat--today' : ''}`}>
+        <span className="rem-stat-num">{todayCount}</span>
+        <span className="rem-stat-label">today</span>
+      </div>
+      <div className="rem-stat">
+        <span className="rem-stat-num">{weekCount}</span>
+        <span className="rem-stat-label">this week</span>
+      </div>
+      <div className="rem-stat">
+        <span className="rem-stat-num">{taskCount}</span>
+        <span className="rem-stat-label">tasks</span>
+      </div>
+    </div>
+  );
+}
+
+// ── SmartDatePicker ─────────────────────────────────────────────────────────
+function SmartDatePicker({ value, onChange, required }) {
+  const [showCustom, setShowCustom] = React.useState(false);
+  const [time, setTime] = React.useState(() => {
+    if (value) return value.slice(11, 16);
+    return '09:00';
+  });
+
+  const pad = n => String(n).padStart(2, '0');
+  const fmt = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+
+  const chips = React.useMemo(() => {
+    const now = new Date();
+    const today = new Date(now); today.setHours(0,0,0,0);
+    const tomorrow = new Date(today); tomorrow.setDate(today.getDate()+1);
+    const sat = new Date(today); sat.setDate(today.getDate() + ((6 - today.getDay() + 7) % 7 || 7));
+    const mon = new Date(today); mon.setDate(today.getDate() + ((8 - today.getDay()) % 7 || 7));
+    const week1 = new Date(today); week1.setDate(today.getDate()+7);
+    const week2 = new Date(today); week2.setDate(today.getDate()+14);
+    return [
+      { label: 'Today',    date: fmt(today) },
+      { label: 'Tomorrow', date: fmt(tomorrow) },
+      { label: 'Weekend',  date: fmt(sat) },
+      { label: 'Mon',      date: fmt(mon) },
+      { label: '+1 wk',    date: fmt(week1) },
+      { label: '+2 wks',   date: fmt(week2) },
+    ];
+  }, []);
+
+  const selectedDate = value ? value.slice(0, 10) : null;
+
+  const pick = (date) => {
+    setShowCustom(false);
+    onChange(`${date}T${time}`);
+  };
+
+  const handleTimeChange = (t) => {
+    setTime(t);
+    if (selectedDate) onChange(`${selectedDate}T${t}`);
+  };
+
+  return (
+    <div className="smart-date-picker">
+      <div className="date-chips">
+        {chips.map(c => (
+          <button
+            key={c.label}
+            type="button"
+            className={`date-chip${selectedDate === c.date ? ' date-chip--active' : ''}`}
+            onClick={() => pick(c.date)}
+          >
+            {c.label}
+          </button>
+        ))}
+        <button
+          type="button"
+          className={`date-chip${showCustom ? ' date-chip--active' : ''}`}
+          onClick={() => setShowCustom(v => !v)}
+        >
+          Custom
+        </button>
+      </div>
+      {showCustom && (
+        <input
+          className="modal-input"
+          type="date"
+          value={selectedDate || ''}
+          onChange={e => pick(e.target.value)}
+          style={{ marginTop: 6 }}
+        />
+      )}
+      {selectedDate && (
+        <div className="time-row">
+          <span className="time-row-label">Time</span>
+          <div className="time-chips">
+            {['08:00','09:00','10:00','11:00','12:00','14:00','16:00','17:00','18:00'].map(t => (
+              <button
+                key={t}
+                type="button"
+                className={`date-chip time-chip${time === t ? ' date-chip--active' : ''}`}
+                onClick={() => handleTimeChange(t)}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <input
+            type="time"
+            className="modal-input time-custom-input"
+            value={time}
+            onChange={e => handleTimeChange(e.target.value)}
+            style={{ marginTop: 6, width: '100%' }}
+          />
+        </div>
+      )}
+      {!selectedDate && required && (
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Tap a date above</div>
+      )}
+    </div>
+  );
+}
+
+// ── ReminderCard ────────────────────────────────────────────────────────────
+function ReminderCard({ r, token, completingId, onComplete, onDelete, onEdit, onDetail, deleteConfirmId, setDeleteConfirmId }) {
+  const swipeRef = useSwipe(
+    () => onComplete(r.id),
+    () => setDeleteConfirmId(r.id)
+  );
+
+  const handleLongPress = React.useCallback(() => {
+    const cycle = { normal: 'high', high: 'low', low: 'normal' };
+    const next = cycle[r.priority] || 'normal';
+    apiFetch(`/api/reminders/${r.id}`, token, {
+      method: 'PATCH',
+      body: JSON.stringify({ priority: next }),
+    });
+    if (navigator.vibrate) navigator.vibrate(30);
+  }, [r, token]);
+
+  const pressTimer = React.useRef(null);
+  const onPressStart = () => { pressTimer.current = setTimeout(handleLongPress, 500); };
+  const onPressEnd   = () => { clearTimeout(pressTimer.current); };
+
+  const isCompleting = completingId === r.id;
+
+  return (
+    <div
+      ref={swipeRef}
+      className={`rem-item rem-item--${urgencyClass(r)}${r.is_task ? ' rem-item--task' : ''}${r.priority === 'high' ? ' rem-item--high' : ''}${isCompleting ? ' rem-item--completing' : ''}`}
+      onClick={() => onDetail(r)}
+      onMouseDown={onPressStart}
+      onMouseUp={onPressEnd}
+      onTouchStart={onPressStart}
+      onTouchEnd={onPressEnd}
+      style={{ cursor: 'pointer' }}
+    >
+      <button
+        className="rem-check-btn"
+        onClick={e => { e.stopPropagation(); onComplete(r.id); }}
+        title="Mark complete"
+      >
+        <div className="rem-check-circle" />
+      </button>
+      <div className="rem-item-body">
+        {r.contact_name && r.contact_name !== 'Manual Task' && r.contact_name !== 'Task' && (
+          <div className="rem-item-contact">{r.contact_name}</div>
+        )}
+        <div className="rem-item-note">{r.note}</div>
+        {r.contact_mobile && (
+          <a href={`tel:${r.contact_mobile}`} className="rem-item-mobile" onClick={e => e.stopPropagation()}>
+            <Phone size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {r.contact_mobile}
+          </a>
+        )}
+        <div className="rem-item-footer">
+          {r.priority === 'high' && <span className="priority-badge">HIGH</span>}
+          {r.fire_at && (
+            <span className="rem-item-time">{fmtDate(r.fire_at)} {fmtTime(r.fire_at)}</span>
+          )}
+          <div className="rem-item-actions">
+            <button className="icon-btn" onClick={e => { e.stopPropagation(); onEdit(r); }} title="Edit">
+              <Pencil size={12} />
+            </button>
+            {deleteConfirmId === r.id ? (
+              <>
+                <button className="icon-btn icon-btn--danger" onClick={e => { e.stopPropagation(); onDelete(r.id); }}>Yes</button>
+                <button className="icon-btn" onClick={e => { e.stopPropagation(); setDeleteConfirmId(null); }}>No</button>
+              </>
+            ) : (
+              <button className="icon-btn icon-btn--danger" onClick={e => { e.stopPropagation(); setDeleteConfirmId(r.id); }} title="Delete">
+                <Trash2 size={12} />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RemindersPage({ token, onReminderCountChange }) {
   const [reminders, setReminders] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
@@ -2839,36 +3094,73 @@ function RemindersPage({ token, onReminderCountChange }) {
   const [deleteConfirmId, setDeleteConfirmId] = React.useState(null);
   const [quickValues, setQuickValues] = React.useState(null);
   const [detailTarget, setDetailTarget] = React.useState(null);
+  const [completingId, setCompletingId] = React.useState(null);
+  const [undoQueue, setUndoQueue]       = React.useState([]);
+  const [tasksExpanded, setTasksExpanded] = React.useState(false);
 
-  const load = React.useCallback(() => {
-    setLoading(true);
+  const load = React.useCallback((silent = false) => {
+    if (!silent) setLoading(true);
     apiFetch('/api/reminders/upcoming', token)
       .then(r => r.ok ? r.json() : [])
       .then(data => {
-        setReminders(Array.isArray(data) ? data : []);
+        const arr = Array.isArray(data) ? data : [];
+        setReminders(prev => {
+          if (JSON.stringify(prev.map(r=>r.id)) === JSON.stringify(arr.map(r=>r.id))) return prev;
+          return arr;
+        });
         setLoading(false);
-        if (onReminderCountChange) onReminderCountChange(
-          (Array.isArray(data) ? data : []).filter(r => r.fire_at && !r.is_task).length
-        );
+        if (onReminderCountChange) onReminderCountChange(arr.filter(r => r.fire_at && !r.is_task).length);
       })
       .catch(() => setLoading(false));
   }, [token]);
 
   React.useEffect(() => { load(); }, [load]);
 
+  // Auto-refresh every 60 seconds silently
+  React.useEffect(() => {
+    const iv = setInterval(() => load(true), 60000);
+    return () => clearInterval(iv);
+  }, [load]);
+
   const handleComplete = React.useCallback((id) => {
-    apiFetch(`/api/reminders/${id}/complete`, token, { method: 'POST' })
-      .then(r => {
-        if (r.ok) {
-          setReminders(prev => {
-            const next = prev.filter(r => r.id !== id);
-            if (onReminderCountChange) onReminderCountChange(next.filter(r => r.fire_at && !r.is_task).length);
-            return next;
-          });
-          setDetailTarget(null);
-        }
+    setCompletingId(id);
+    const completing = reminders.find(r => r.id === id);
+
+    setTimeout(() => {
+      setReminders(prev => {
+        const next = prev.filter(r => r.id !== id);
+        if (onReminderCountChange) onReminderCountChange(next.filter(r => r.fire_at && !r.is_task).length);
+        return next;
       });
-  }, [token, onReminderCountChange]);
+      setCompletingId(null);
+    }, 350);
+
+    const timer = setTimeout(() => {
+      apiFetch(`/api/reminders/${id}/complete`, token, { method: 'POST' });
+      setUndoQueue(prev => prev.filter(u => u.id !== id));
+    }, 3000);
+
+    setUndoQueue(prev => [...prev, { id, reminder: completing, timer }]);
+  }, [reminders, token, onReminderCountChange]);
+
+  const handleUndo = React.useCallback((id) => {
+    setUndoQueue(prev => {
+      const entry = prev.find(u => u.id === id);
+      if (entry) {
+        clearTimeout(entry.timer);
+        setReminders(cur => {
+          const exists = cur.find(r => r.id === id);
+          if (exists) return cur;
+          return [...cur, entry.reminder].sort((a, b) => {
+            if (!a.fire_at && b.fire_at) return 1;
+            if (a.fire_at && !b.fire_at) return -1;
+            return new Date(a.fire_at) - new Date(b.fire_at);
+          });
+        });
+      }
+      return prev.filter(u => u.id !== id);
+    });
+  }, []);
 
   const handleDelete = React.useCallback((id) => {
     apiFetch(`/api/reminders/${id}`, token, { method: 'DELETE' })
@@ -2885,7 +3177,7 @@ function RemindersPage({ token, onReminderCountChange }) {
       });
   }, [token, onReminderCountChange]);
 
-  const handleSaved = React.useCallback((savedReminder, isEdit) => {
+  const handleSaved = React.useCallback(() => {
     setShowAddModal(false);
     setEditTarget(null);
     setQuickValues(null);
@@ -2893,13 +3185,29 @@ function RemindersPage({ token, onReminderCountChange }) {
     load();
   }, [load]);
 
-  const handleQuickParsed = React.useCallback((parsed) => {
+  const handleQuickParsed = React.useCallback(async (parsed) => {
+    const canSaveDirect = parsed.note && (parsed.fire_at || parsed.is_task) && !parsed.contact_id;
+    if (canSaveDirect) {
+      try {
+        const body = {
+          note:             parsed.note,
+          contact_name:     parsed.contact_name || 'Manual Task',
+          contact_mobile:   parsed.contact_mobile || null,
+          fire_at:          parsed.fire_at || null,
+          is_task:          parsed.is_task ? 1 : 0,
+          duration_minutes: 30,
+          priority:         parsed.priority || 'normal',
+          ical_title:       parsed.ical_title || null,
+        };
+        const res = await apiFetch('/api/reminders', token, { method: 'POST', body: JSON.stringify(body) });
+        if (res.ok) { load(); return; }
+      } catch (_) {}
+    }
     setQuickValues(parsed);
     setAddIsTask(!!parsed.is_task);
     setShowAddModal(true);
-  }, []);
+  }, [token, load]);
 
-  // Group reminders by time bucket
   function groupReminders(items) {
     const now = new Date();
     const todayEnd = new Date(); todayEnd.setHours(23,59,59,999);
@@ -2920,7 +3228,6 @@ function RemindersPage({ token, onReminderCountChange }) {
   }
 
   const groups = groupReminders(reminders);
-  const totalCount = reminders.length;
 
   const GROUP_CONFIG = [
     { key: 'overdue',   label: 'OVERDUE',   color: 'var(--outcome-notint)' },
@@ -2935,28 +3242,27 @@ function RemindersPage({ token, onReminderCountChange }) {
     <div className="reminders-page">
       <div className="reminders-toolbar">
         <button className="rem-add-btn rem-add-task" onClick={() => { setEditTarget(null); setAddIsTask(true); setShowAddModal(true); }}>
-          <Plus size={13} /> Add Task
+          <Plus size={13} /> Task
         </button>
         <button className="rem-add-btn rem-add-reminder" onClick={() => { setEditTarget(null); setAddIsTask(false); setShowAddModal(true); }}>
-          <Bell size={13} /> Add Reminder
+          <Bell size={13} /> Reminder
         </button>
-        <button className="rem-refresh-btn" onClick={load} title="Refresh">
+        <button className="rem-refresh-btn" onClick={() => load()} title="Refresh">
           <RefreshCw size={13} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} />
         </button>
-        <span className="rem-count">{totalCount} pending</span>
+        <span className="rem-count">{reminders.length} pending</span>
       </div>
 
+      <RemindersStatsBar groups={groups} />
       <WeekStrip reminders={reminders} />
-
       <QuickAddBar token={token} onParsed={handleQuickParsed} />
 
-      {loading && <div className="loading-msg">Loading...</div>}
-
-      {!loading && totalCount === 0 && (
+      {loading && reminders.length === 0 && <div className="loading-msg">Loading...</div>}
+      {!loading && reminders.length === 0 && (
         <div className="empty-state">No pending reminders or tasks.</div>
       )}
 
-      {GROUP_CONFIG.map(({ key, label, color }) => {
+      {GROUP_CONFIG.filter(g => g.key !== 'no_date').map(({ key, label, color }) => {
         const items = groups[key];
         if (items.length === 0) return null;
         return (
@@ -2965,54 +3271,65 @@ function RemindersPage({ token, onReminderCountChange }) {
               {label} <span className="rem-group-count">{items.length}</span>
             </div>
             {items.map(r => (
-              <div key={r.id} className={`rem-item rem-item--${urgencyClass(r)}${r.is_task ? ' rem-item--task' : ''}${r.priority === 'high' ? ' rem-item--high' : ''}`} onClick={() => setDetailTarget(r)} style={{ cursor: 'pointer' }}>
-                <button className="rem-check-btn" onClick={e => { e.stopPropagation(); handleComplete(r.id); }} title="Mark complete">
-                  <div className="rem-check-circle" />
-                </button>
-                <div className="rem-item-body">
-                  {r.contact_name && r.contact_name !== 'Manual Task' && r.contact_name !== 'Task' && (
-                    <div className="rem-item-contact">{r.contact_name}</div>
-                  )}
-                  <div className="rem-item-note">{r.note}</div>
-                  {r.contact_mobile && (
-                    <a href={`tel:${r.contact_mobile}`} className="rem-item-mobile" onClick={e => e.stopPropagation()}>
-                      <Phone size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {r.contact_mobile}
-                    </a>
-                  )}
-                  <div className="rem-item-footer">
-                    {r.priority === 'high' && <span className="priority-badge">HIGH</span>}
-                    {r.fire_at && (
-                      <span className="rem-item-time">{fmtDate(r.fire_at)} {fmtTime(r.fire_at)}</span>
-                    )}
-                    <div className="rem-item-actions">
-                      <button className="icon-btn" onClick={e => { e.stopPropagation(); setEditTarget(r); }} title="Edit">
-                        <Pencil size={12} />
-                      </button>
-                      {deleteConfirmId === r.id ? (
-                        <>
-                          <button className="icon-btn icon-btn--danger" onClick={e => { e.stopPropagation(); handleDelete(r.id); }}>Yes</button>
-                          <button className="icon-btn" onClick={e => { e.stopPropagation(); setDeleteConfirmId(null); }}>No</button>
-                        </>
-                      ) : (
-                        <button className="icon-btn icon-btn--danger" onClick={e => { e.stopPropagation(); setDeleteConfirmId(r.id); }} title="Delete">
-                          <Trash2 size={12} />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <ReminderCard
+                key={r.id}
+                r={r}
+                token={token}
+                completingId={completingId}
+                onComplete={handleComplete}
+                onDelete={handleDelete}
+                onEdit={r => { setEditTarget(r); setShowAddModal(false); }}
+                onDetail={setDetailTarget}
+                deleteConfirmId={deleteConfirmId}
+                setDeleteConfirmId={setDeleteConfirmId}
+              />
             ))}
           </div>
         );
       })}
 
+      {/* Collapsible TASKS section */}
+      {groups.no_date.length > 0 && (
+        <div id="rem-group-tasks" className="rem-group">
+          <div
+            className="rem-group-header rem-group-header--collapsible"
+            style={{ color: 'var(--text-muted)', cursor: 'pointer' }}
+            onClick={() => setTasksExpanded(v => !v)}
+          >
+            TASKS <span className="rem-group-count">{groups.no_date.length}</span>
+            <span style={{ marginLeft: 'auto', fontSize: 11 }}>{tasksExpanded ? '▲' : '▼'}</span>
+          </div>
+          {tasksExpanded && groups.no_date.map(r => (
+            <ReminderCard
+              key={r.id}
+              r={r}
+              token={token}
+              completingId={completingId}
+              onComplete={handleComplete}
+              onDelete={handleDelete}
+              onEdit={r => { setEditTarget(r); setShowAddModal(false); }}
+              onDetail={setDetailTarget}
+              deleteConfirmId={deleteConfirmId}
+              setDeleteConfirmId={setDeleteConfirmId}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Undo toasts */}
+      {undoQueue.length > 0 && (
+        <div className="undo-toasts">
+          {undoQueue.map(u => (
+            <div key={u.id} className="undo-toast">
+              <span>Completed</span>
+              <button className="undo-btn" onClick={() => handleUndo(u.id)}>Undo</button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {detailTarget && (
-        <ReminderDetailModal
-          reminder={detailTarget}
-          token={token}
-          onClose={() => setDetailTarget(null)}
-        />
+        <ReminderDetailModal reminder={detailTarget} token={token} onClose={() => setDetailTarget(null)} />
       )}
 
       {(showAddModal || editTarget) && (
@@ -3022,11 +3339,7 @@ function RemindersPage({ token, onReminderCountChange }) {
           initialValues={!editTarget ? quickValues : null}
           defaultIsTask={addIsTask}
           onSaved={handleSaved}
-          onClose={() => {
-            setShowAddModal(false);
-            setEditTarget(null);
-            setQuickValues(null);
-          }}
+          onClose={() => { setShowAddModal(false); setEditTarget(null); setQuickValues(null); }}
         />
       )}
     </div>
@@ -3188,11 +3501,10 @@ function AddEditReminderModal({ token, reminder, initialValues = null, defaultIs
           </div>
           <div className="modal-field">
             <label>{isTask ? 'Due Date (optional)' : 'Date & Time *'}</label>
-            <input
-              className="modal-input"
-              type="datetime-local"
+            <SmartDatePicker
               value={fireAt}
-              onChange={e => setFireAt(e.target.value)}
+              onChange={setFireAt}
+              required={!isTask}
             />
           </div>
           {!isTask && (

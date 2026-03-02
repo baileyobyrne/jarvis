@@ -3571,3 +3571,149 @@ body::before {
   cursor: pointer;
 }
 .contact-match-dismiss:hover { color: var(--text-primary); border-color: var(--text-muted); }
+
+/* ── Reminders Stats Bar ───────────────────────────────────────────── */
+.rem-stats-bar {
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.rem-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 44px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--bg-raised);
+}
+.rem-stat--overdue { background: rgba(220,50,50,0.15); }
+.rem-stat--today   { background: rgba(200,169,110,0.15); }
+.rem-stat-num   { font-size: 18px; font-weight: 700; font-family: var(--font-mono); color: var(--text-primary); line-height: 1; }
+.rem-stat--overdue .rem-stat-num { color: var(--outcome-notint); }
+.rem-stat--today   .rem-stat-num { color: var(--gold); }
+.rem-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-top: 2px; }
+
+/* ── Smart Date Picker ────────────────────────────────────────────── */
+.smart-date-picker { display: flex; flex-direction: column; gap: 8px; }
+.date-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.date-chip {
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.date-chip:hover { border-color: var(--gold); color: var(--text-primary); }
+.date-chip--active { background: var(--gold); color: #000; border-color: var(--gold); font-weight: 600; }
+.time-row { display: flex; flex-direction: column; gap: 6px; }
+.time-row-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+.time-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.time-chip { padding: 5px 8px; font-size: 11px; }
+.time-custom-input { margin-top: 4px; }
+
+/* ── Completion animation ─────────────────────────────────────────── */
+.rem-item--completing {
+  animation: slideOutRight 0.35s ease forwards;
+}
+@keyframes slideOutRight {
+  to { transform: translateX(110%); opacity: 0; background: rgba(50,200,100,0.2); }
+}
+
+/* ── Overdue pulse ────────────────────────────────────────────────── */
+.rem-item--overdue {
+  border-left: 3px solid var(--outcome-notint);
+  animation: overduePulse 2s ease-in-out infinite;
+}
+@keyframes overduePulse {
+  0%, 100% { border-left-color: var(--outcome-notint); }
+  50%       { border-left-color: rgba(220,50,50,0.3); }
+}
+
+/* ── Undo toasts ──────────────────────────────────────────────────── */
+.undo-toasts {
+  position: fixed;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 9999;
+  pointer-events: none;
+}
+.undo-toast {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-gold);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--text-primary);
+  pointer-events: all;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  animation: toastIn 0.2s ease;
+}
+@keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.undo-btn {
+  background: var(--gold);
+  color: #000;
+  border: none;
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* ── Collapsible group header ─────────────────────────────────────── */
+.rem-group-header--collapsible {
+  display: flex;
+  align-items: center;
+  user-select: none;
+}
+.rem-group-header--collapsible:hover { color: var(--text-primary) !important; }
+
+/* ── Mobile swipe hint (faint background indicators) ─────────────── */
+@media (max-width: 768px) {
+  .rem-item {
+    position: relative;
+    overflow: hidden;
+  }
+  .rem-item::before {
+    content: '✓';
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #3c3;
+    font-size: 18px;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+  }
+  .rem-item::after {
+    content: '✕';
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--outcome-notint);
+    font-size: 18px;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+  }
+}
