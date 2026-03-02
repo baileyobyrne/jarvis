@@ -10,7 +10,7 @@ You'll need these two things:
 
 | | |
 |---|---|
-| **Jarvis URL** | `https://72.62.74.105:4242` |
+| **Jarvis URL** | `https://jarvis.baileyobyrne.com` |
 | **Jarvis Password** | `solar-atlas-cedar-ember` |
 
 ---
@@ -38,7 +38,7 @@ You'll need these two things:
 
 1. Tap **Add Action**
 2. Search for **Get Contents of URL** and tap it
-3. Tap the URL field and enter: `https://72.62.74.105:4242/api/reminders/ios-pending`
+3. Tap the URL field and enter: `https://jarvis.baileyobyrne.com/api/reminders/ios-pending`
 4. Tap **Show More** (below the URL)
 5. Change **Method** to `GET`
 6. Tap **Add new header**
@@ -115,11 +115,11 @@ Now you are inside the loop. Add the following actions **inside** the Repeat blo
 1. Tap **Add Action**
 2. Search for **Get Contents of URL** and tap it
 3. Tap the URL field and enter:
-   `https://72.62.74.105:4242/api/reminders/`
+   `https://jarvis.baileyobyrne.com/api/reminders/`
    then tap the **Variable** icon and select `RId`
    then type `/ios-synced` immediately after (no spaces)
 
-   The full URL should look like: `https://72.62.74.105:4242/api/reminders/[RId]/ios-synced`
+   The full URL should look like: `https://jarvis.baileyobyrne.com/api/reminders/[RId]/ios-synced`
 
 4. Tap **Show More**
 5. Change **Method** to `POST`
