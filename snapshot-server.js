@@ -9,7 +9,7 @@ const { db }    = require('./lib/db.js');
 const multer    = require('multer');
 const axios     = require('axios');
 const rateLimit = require('express-rate-limit');
-const { createCalendarEvent, fetchTodayEvents } = require('./lib/ical-calendar.js');
+const { createCalendarEvent, fetchTodayEvents, createReminder, completeReminder } = require('./lib/ical-calendar.js');
 const upload  = multer({
   dest: '/root/.openclaw/workspace/intel/',
   limits: { fileSize: 10 * 1024 * 1024 }
@@ -1374,20 +1374,45 @@ app.post('/api/reminders', requireAuth, async (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(contact_id || null, contact_name, contact_mobile || null, note, fire_at || null, dur, isTask, priority || 'normal');
 
-    // iCloud Calendar sync — all reminders and tasks that have a fire_at time
-    if (fire_at) {
-      createCalendarEvent({
-        contact_name:     contact_name || 'Unknown',
-        contact_mobile:   contact_mobile || null,
-        contact_address:  null,
-        note:             note || '',
-        fire_at,
-        duration_minutes: dur,
-        ical_title:       ical_title || null,
-      }).then(uid => {
-        if (uid) db.prepare('UPDATE reminders SET calendar_event_uid = ? WHERE id = ?').run(uid, r.lastInsertRowid);
-      }).catch(e => console.warn('[reminders] iCal sync failed:', e.message));
-    }
+    // iCloud Calendar + Reminders sync — fire-and-forget
+    setImmediate(async () => {
+      try {
+        const reminderOpts = {
+          contact_name:   contact_name || 'Manual Task',
+          contact_mobile: contact_mobile || null,
+          note:           note || '',
+          fire_at:        fire_at || null,
+          ical_title:     ical_title || null,
+          priority:       priority || 'normal',
+        };
+
+        // Always create a Reminder in Apple Reminders (tasks too — no due date is fine)
+        const vtodoUid = await createReminder(reminderOpts);
+        if (vtodoUid) {
+          db.prepare('UPDATE reminders SET vtodo_uid = ? WHERE id = ?').run(vtodoUid, r.lastInsertRowid);
+          console.log(`[reminders] vtodo_uid stored: ${vtodoUid}`);
+        }
+
+        // Also create a Calendar event if there's a fire_at time (timed reminders only)
+        if (fire_at) {
+          const calUid = await createCalendarEvent({
+            contact_name:     contact_name || 'Manual Task',
+            contact_mobile:   contact_mobile || null,
+            contact_address:  null,
+            note:             note || '',
+            fire_at,
+            duration_minutes: dur,
+            ical_title:       ical_title || null,
+          });
+          if (calUid) {
+            db.prepare('UPDATE reminders SET calendar_event_uid = ? WHERE id = ?').run(calUid, r.lastInsertRowid);
+            console.log(`[reminders] calendar_event_uid stored: ${calUid}`);
+          }
+        }
+      } catch (e) {
+        console.warn('[reminders] iCloud sync failed:', e.message);
+      }
+    });
 
     res.json({ ok: true, id: r.lastInsertRowid });
   } catch (e) {
@@ -1419,10 +1444,21 @@ app.post('/api/reminders/:id/complete', requireAuth, (req, res) => {
   try {
     const id = parseInt(req.params.id);
     if (!id) return res.status(400).json({ error: 'invalid id' });
-    const existing = db.prepare('SELECT id FROM reminders WHERE id = ? AND completed_at IS NULL').get(id);
+    const existing = db.prepare('SELECT id, vtodo_uid FROM reminders WHERE id = ? AND completed_at IS NULL').get(id);
     if (!existing) return res.status(404).json({ error: 'not found or already completed' });
     db.prepare("UPDATE reminders SET completed_at = datetime('now') WHERE id = ?").run(id);
     res.json({ ok: true });
+
+    // Fire-and-forget: mark complete in Apple Reminders
+    if (existing.vtodo_uid) {
+      setImmediate(async () => {
+        try {
+          await completeReminder(existing.vtodo_uid);
+        } catch (e) {
+          console.warn('[reminders] completeReminder failed:', e.message);
+        }
+      });
+    }
   } catch (e) {
     console.error('[POST /api/reminders/:id/complete]', e.message);
     res.status(500).json({ error: e.message });
